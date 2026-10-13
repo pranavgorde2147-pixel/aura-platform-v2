@@ -30,7 +30,7 @@ psycopg==3.3.4
 psycopg-binary==3.3.4
 pyasn1==0.6.4
 pycparser==3.0
-pydantic==2.13.4
+pydantic[email]==2.13.4
 pydantic-settings==2.14.2
 pydantic_core==2.46.4
 python-dotenv==1.2.2
