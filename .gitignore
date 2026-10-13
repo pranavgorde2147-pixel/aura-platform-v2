@@ -35,5 +35,8 @@ server2/models/
 # Server 2 object-storage data (SQLite metadata + objects)
 server2/data/
 
+# Legacy Server 3 object-storage data (SQLite metadata + objects)
+server3/data/
+
 # Stale git worktree copies
 **/backend.worktrees/server3/data/
