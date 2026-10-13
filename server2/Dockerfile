@@ -20,7 +20,7 @@ COPY app ./app
 COPY tests ./tests
 COPY README.md ./README.md
 
-RUN mkdir -p /models && chown -R app:app /srv/server2 /models
+RUN mkdir -p /models /var/data && chown -R app:app /srv/server2 /models /var/data
 
 USER app
 EXPOSE 8001

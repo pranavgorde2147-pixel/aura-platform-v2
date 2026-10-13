@@ -1,0 +1,11 @@
+# Optional dependencies to serve GGUF checkpoints (e.g. Qwen3.5-0.8B-Q4_K_M.gguf)
+# through llama.cpp. Install separately from the base requirements:
+#
+#   pip install -r requirements-gguf.txt
+#
+# Point MODEL_PATH at the .gguf file and set AURA_SKIP_MODEL_LOAD=false.
+# 0.3.36 is the oldest prebuilt wheel that knows the qwen35 (Qwen3.5 hybrid
+# SSM+attention) architecture. For a CUDA build (friend's RTX 4050 laptop),
+# build llama-cpp-python with:
+#   CMAKE_ARGS="-DGGML_CUDA=on" FORCE_CMAKE=1 pip install --force-reinstall -r requirements-gguf.txt
+llama-cpp-python==0.3.36

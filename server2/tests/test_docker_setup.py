@@ -8,17 +8,17 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-MODEL_DIR = Path(os.getenv("MODEL_PATH", REPO_ROOT / "models" / "Qwen3.5-4B"))
+MODEL_FILE = Path(os.getenv("MODEL_PATH", REPO_ROOT / "models" / "Qwen3.5-0.8B-Q4_K_M.gguf"))
 
 
-@pytest.mark.skipif(not (MODEL_DIR / "config.json").exists(), reason="local model checkpoint not present")
+@pytest.mark.skipif(not MODEL_FILE.exists(), reason="local model checkpoint not present")
 def test_model_checkpoint_layout():
-    assert MODEL_DIR.exists()
-    assert (MODEL_DIR / "config.json").exists()
+    assert MODEL_FILE.exists()
+    assert MODEL_FILE.suffix == ".gguf" or MODEL_FILE.is_dir()
 
 
-def test_no_model_load_requirement():
-    assert "Qwen3.5-4B" in os.getenv("MODEL_NAME", "Qwen3.5-4B")
+def test_default_model_name():
+    assert "Qwen3.5" in os.getenv("MODEL_NAME", "Qwen3.5-0.8B")
 
 
 def test_dockerfile_includes_only_app_files():
@@ -28,13 +28,16 @@ def test_dockerfile_includes_only_app_files():
     assert "COPY tests" in dockerfile
     assert "COPY models" not in dockerfile
     assert "/models/" in dockerfile
+    assert "/var/data" in dockerfile
 
 
 def test_docker_compose_uses_read_only_model_mount():
     text = (REPO_ROOT / "docker-compose.yml").read_text()
     assert "8001:8001" in text
-    assert "/models/Qwen3.5-4B:ro" in text
-    assert "Qwen3.5-4B" in text
+    assert "/models:ro" in text
+    assert "Qwen3.5-0.8B" in text
+    assert "STORAGE_BACKEND" in text
+    assert "/var/data" in text
     assert "/home/pranav_gorde" not in text
 
 

@@ -114,3 +114,81 @@ def test_users_cannot_access_each_other(client):
 
     user_b = client.get(f"/api/v1/users/email/{email_b}", headers=headers_a)
     assert user_b.status_code == 403
+
+
+@pytest.mark.integration
+def test_app_registry_connection_lifecycle(client):
+    email = f"apps-{uuid.uuid4().hex[:8]}@example.com"
+    _register(client, email)
+    tokens = _login(client, email)
+    headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+
+    catalog = client.get("/api/v1/apps")
+    assert catalog.status_code == 200
+    assert any(entry["slug"] == "meeting" for entry in catalog.json())
+    assert client.get("/api/v1/apps/meeting").json()["name"] == "AURA Meeting"
+    assert client.get("/api/v1/apps/unknown-app").status_code == 404
+
+    install = client.post("/api/v1/apps/me", json={"module_slug": "meeting"}, headers=headers)
+    assert install.status_code == 201, install.text
+    body = install.json()
+    assert body["module_slug"] == "meeting"
+    assert body["is_active"] is True
+    assert len(body["permissions"]) == 3
+    module_id = body["id"]
+
+    listing = client.get("/api/v1/apps/me", headers=headers)
+    assert listing.status_code == 200
+    assert [item["id"] for item in listing.json()["items"]] == [module_id]
+
+    duplicate = client.post("/api/v1/apps/me", json={"module_slug": "meeting"}, headers=headers)
+    assert duplicate.status_code == 409
+
+    unknown = client.post("/api/v1/apps/me", json={"module_slug": "not-an-app"}, headers=headers)
+    assert unknown.status_code == 404
+
+    one = client.get(f"/api/v1/apps/me/{module_id}", headers=headers)
+    assert one.status_code == 200 and one.json()["module_slug"] == "meeting"
+
+    update = client.patch(
+        f"/api/v1/apps/me/{module_id}",
+        json={"is_active": False, "permissions": [{"scope": "brain", "action": "read"}]},
+        headers=headers,
+    )
+    assert update.status_code == 200, update.text
+    assert update.json()["is_active"] is False
+    assert len(update.json()["permissions"]) == 1
+    assert update.json()["permissions"][0]["scope"] == "brain"
+
+    replaced = client.put(
+        f"/api/v1/apps/me/{module_id}",
+        json={"is_active": True},
+        headers=headers,
+    )
+    assert replaced.status_code == 200 and replaced.json()["is_active"] is True
+
+    deleted = client.delete(f"/api/v1/apps/me/{module_id}", headers=headers)
+    assert deleted.status_code == 204
+    assert client.get(f"/api/v1/apps/me/{module_id}", headers=headers).status_code == 404
+
+
+@pytest.mark.integration
+def test_app_connections_are_isolated_per_user(client):
+    email_a = f"appa-{uuid.uuid4().hex[:8]}@example.com"
+    email_b = f"appb-{uuid.uuid4().hex[:8]}@example.com"
+    _register(client, email_a)
+    _register(client, email_b)
+
+    headers_a = {"Authorization": f"Bearer {_login(client, email_a)['access_token']}"}
+    headers_b = {"Authorization": f"Bearer {_login(client, email_b)['access_token']}"}
+
+    created = client.post("/api/v1/apps/me", json={"module_slug": "brain"}, headers=headers_a)
+    assert created.status_code == 201, created.text
+    module_id = created.json()["id"]
+
+    assert client.get("/api/v1/apps/me", headers=headers_b).json()["items"] == []
+    assert client.get(f"/api/v1/apps/me/{module_id}", headers=headers_b).status_code == 404
+    assert client.delete(f"/api/v1/apps/me/{module_id}", headers=headers_b).status_code == 404
+    assert client.patch(f"/api/v1/apps/me/{module_id}", json={"is_active": False}, headers=headers_b).status_code == 404
+
+    assert client.delete(f"/api/v1/apps/me/{module_id}", headers=headers_a).status_code == 204

@@ -9,16 +9,27 @@ services:
     environment:
       HOST: 0.0.0.0
       PORT: 8001
-      MODEL_NAME: ${MODEL_NAME:-Qwen3.5-4B}
-      MODEL_PATH: /models/Qwen3.5-4B
+      MODEL_NAME: ${MODEL_NAME:-Qwen3.5-0.8B}
+      MODEL_PATH: ${MODEL_PATH:-/models/Qwen3.5-0.8B-Q4_K_M.gguf}
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-}
       AURA_SKIP_MODEL_LOAD: ${AURA_SKIP_MODEL_LOAD:-0}
       EXTERNAL_AI_URL: ${EXTERNAL_AI_URL:-}
       EXTERNAL_AI_KEY: ${EXTERNAL_AI_KEY:-}
       EXTERNAL_MODEL: ${EXTERNAL_MODEL:-}
+      GGUF_N_GPU_LAYERS: ${GGUF_N_GPU_LAYERS:--1}
+      GGUF_N_CTX: ${GGUF_N_CTX:-4096}
+      REPEAT_PENALTY: ${REPEAT_PENALTY:-1.2}
+      MIN_P: ${MIN_P:-0.05}
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-local}
+      STORAGE_DATA_DIR: /var/data
+      STORAGE_LOCAL_ROOT: /var/data/objects
+      STORAGE_DATABASE_URL: ${STORAGE_DATABASE_URL:-sqlite+aiosqlite:////var/data/storage.db}
+      STORAGE_API_TOKEN: ${STORAGE_API_TOKEN:-${INTERNAL_API_TOKEN:-}}
+      MAX_UPLOAD_SIZE_BYTES: ${MAX_UPLOAD_SIZE_BYTES:-52428800}
     volumes:
-      # Host directory holding the Qwen3.5-4B checkpoint. Override with MODEL_HOST_PATH.
-      - ${MODEL_HOST_PATH:-./models/Qwen3.5-4B}:/models/Qwen3.5-4B:ro
+      # Host directory holding the Qwen3.5 GGUF checkpoint. Override with MODEL_HOST_PATH.
+      - ${MODEL_HOST_PATH:-./models}:/models:ro
+      - server2_data:/var/data
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request, sys; r = urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=5); sys.exit(0 if r.status == 200 else 1)"]
       interval: 15s
@@ -32,3 +43,7 @@ networks:
   aura-network:
     external: true
     name: aura-network
+
+volumes:
+  server2_data:
+    driver: local

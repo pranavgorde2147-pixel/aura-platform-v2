@@ -31,7 +31,13 @@ class ModulePermission(BaseModel):
 
     __tablename__ = "module_permissions"
     __table_args__ = (
-        UniqueConstraint("user_id", "installed_module_id", "scope", name="uq_module_permissions_user_module_scope"),
+        UniqueConstraint(
+            "user_id",
+            "installed_module_id",
+            "scope",
+            "permission",
+            name="uq_module_permissions_user_module_scope_action",
+        ),
     )
 
     user_id: Mapped[uuid.UUID] = mapped_column(

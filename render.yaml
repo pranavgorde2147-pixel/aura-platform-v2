@@ -1,9 +1,9 @@
 services:
-  # ============ Server 1 - AURA Backend (FastAPI) ============
+  # ============ Server 1 - AURA Core (online API and control plane) ============
   - type: web
-    name: aura-server1
+    name: aura-server1a-core
     runtime: docker
-    repo: https://github.com/pranavgorde2147-pixel/aura-platform
+    repo: https://github.com/pranavgorde2147-pixel/aura-platform-v2
     dockerContext: ./server1
     dockerfilePath: ./server1/Dockerfile
     healthCheckPath: /api/v1/health
@@ -33,11 +33,16 @@ services:
       - key: CORS_ALLOWED_ORIGINS
         sync: false
 
-  # ============ Server 2 - Inference (Groq external provider) ============
+  # ============ Server 2 - AURA Brain (inference + memory + object storage) ============
+  # This service hosts the /v1/brain/infer API and, since Server 3 was retired,
+  # also the /v1/objects storage API (Server 1 points STORAGE_SERVER_URL here).
+  # It runs with AURA_SKIP_MODEL_LOAD=1 using the external Groq provider on Render;
+  # the local GGUF (Qwen3.5-0.8B) runs on the GPU laptop and must be reached
+  # through a secure private tunnel, not localhost.
   - type: web
     name: aura-server2
     runtime: docker
-    repo: https://github.com/pranavgorde2147-pixel/aura-platform
+    repo: https://github.com/pranavgorde2147-pixel/aura-platform-v2
     dockerContext: ./server2
     dockerfilePath: ./server2/Dockerfile
     healthCheckPath: /health
@@ -57,22 +62,6 @@ services:
         value: "0.6"
       - key: TOP_P
         value: "0.95"
-      # Set values in the Render dashboard (secrets never committed):
-      - key: INTERNAL_API_TOKEN
-        sync: false
-      - key: EXTERNAL_AI_KEY
-        sync: false
-
-  # ============ Server 3 - Object Storage Engine ============
-  - type: web
-    name: aura-server3
-    runtime: docker
-    repo: https://github.com/pranavgorde2147-pixel/aura-platform
-    dockerContext: ./server3
-    dockerfilePath: ./server3/Dockerfile
-    healthCheckPath: /health
-    dockerCommand: "python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT"
-    envVars:
       - key: STORAGE_BACKEND
         value: local
       - key: STORAGE_DATA_DIR
@@ -82,9 +71,13 @@ services:
       - key: STORAGE_DATABASE_URL
         value: sqlite+aiosqlite:////var/data/storage.db
       # Set values in the Render dashboard (secrets never committed):
+      - key: INTERNAL_API_TOKEN
+        sync: false
       - key: STORAGE_API_TOKEN
         sync: false
+      - key: EXTERNAL_AI_KEY
+        sync: false
     disk:
-      name: aura-storage-data
+      name: aura-server2-data
       mountPath: /var/data
       sizeGB: 10

@@ -280,6 +280,66 @@ class PersonalBrainService:
             "recent_timeline_count": len(recent_timeline),
         }
 
+
+    async def update_memory_for_user(
+        self,
+        user: User,
+        memory_id: uuid.UUID,
+        content: str | None = None,
+        summary: str | None = None,
+        importance: int | None = None,
+    ) -> BrainMemory | None:
+        """Update a memory owned by the user's AI identity."""
+        identity = await self.identity_repo.get_by_user_id(user.id)
+        if identity is None:
+            return None
+        memory = await self.brain_memory_repo.get_by_id(memory_id)
+        if memory is None or memory.ai_identity_id != identity.id:
+            return None
+        updates = {}
+        if content is not None:
+            updates["content"] = content
+        if summary is not None:
+            updates["summary"] = summary
+        if importance is not None:
+            updates["importance"] = importance
+        if not updates:
+            return memory
+        updated = await self.brain_memory_repo.update(memory_id, **updates)
+        await self.brain_memory_repo.commit()
+        return updated
+
+    async def delete_memory_for_user(self, user: User, memory_id: uuid.UUID) -> bool:
+        """Delete a memory owned by the user's AI identity."""
+        identity = await self.identity_repo.get_by_user_id(user.id)
+        if identity is None:
+            return False
+        memory = await self.brain_memory_repo.get_by_id(memory_id)
+        if memory is None or memory.ai_identity_id != identity.id:
+            return False
+        result = await self.brain_memory_repo.delete(memory_id)
+        await self.brain_memory_repo.commit()
+        return result
+
+    async def get_memory_for_user(self, user: User, memory_id: uuid.UUID) -> BrainMemory | None:
+        """Get a memory owned by the user's AI identity."""
+        identity = await self.identity_repo.get_by_user_id(user.id)
+        if identity is None:
+            return None
+        memory = await self.brain_memory_repo.get_by_id(memory_id)
+        if memory is None or memory.ai_identity_id != identity.id:
+            return None
+        return memory
+
+    async def search_memories_for_user(
+        self, user: User, query: str, limit: int = 10
+    ) -> list[BrainMemory]:
+        """Search memories for a user's AI identity."""
+        identity = await self.identity_repo.get_by_user_id(user.id)
+        if identity is None:
+            return []
+        return await self.brain_memory_repo.search_by_identity(identity.id, query, limit=limit)
+
     async def update_sync_version(self, ai_identity_id: uuid.UUID) -> PersonalAIBrain | None:
         """Update the sync version of a brain."""
         brain = await self.brain_repo.get_by_ai_identity_id(ai_identity_id)

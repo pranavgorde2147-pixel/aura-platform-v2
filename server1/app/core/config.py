@@ -43,10 +43,11 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = Field(default=15, alias="ACCESS_TOKEN_EXPIRE_MINUTES")
     refresh_token_expire_days: int = Field(default=7, alias="REFRESH_TOKEN_EXPIRE_DAYS")
     ai_server_url: str = Field(default="http://localhost:8001", alias="AI_SERVER_URL")
-    ai_server_model: str = Field(default="Qwen3.5-4B", alias="AI_SERVER_MODEL")
+    ai_server_model: str = Field(default="Qwen3.5-0.8B", alias="AI_SERVER_MODEL")
     internal_api_token: str = Field(default="", alias="INTERNAL_API_TOKEN")
-    # Server 3 (Storage). Falls back to INTERNAL_API_TOKEN when unset.
-    storage_server_url: str = Field(default="http://localhost:8002", alias="STORAGE_SERVER_URL")
+    # Object storage API (formerly Server 3, now hosted by Server 2). Falls back
+    # to INTERNAL_API_TOKEN when unset.
+    storage_server_url: str = Field(default="http://localhost:8001", alias="STORAGE_SERVER_URL")
     storage_api_token: str = Field(default="", alias="STORAGE_API_TOKEN")
     # Optional external AI failover used when Server 2 is unreachable
     # (for example when the local-GPU host is asleep or offline).
@@ -66,7 +67,7 @@ class Settings(BaseSettings):
 
     @property
     def effective_storage_token(self) -> str:
-        """Return the token used to authenticate against Server 3."""
+        """Return the token used to authenticate against the storage API."""
         return self.storage_api_token or self.internal_api_token
 
     @field_validator("cors_allowed_origins", mode="before")

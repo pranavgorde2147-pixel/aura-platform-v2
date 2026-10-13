@@ -32,5 +32,8 @@ snapshots/
 # Server 2 model mount (read-only host directory, never bundled)
 server2/models/
 
+# Server 2 object-storage data (SQLite metadata + objects)
+server2/data/
+
 # Stale git worktree copies
 **/backend.worktrees/server3/data/

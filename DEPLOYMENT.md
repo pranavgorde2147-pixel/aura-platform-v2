@@ -1,35 +1,42 @@
 # AURA Deployment Guide
 
-Three services: **Server 1** (public API), **Server 2** (AI inference),
-Server 3 (object storage). Clients only ever talk to Server 1; it calls the
-other two with the shared internal token.
+Two services: **Server 1** (public API + control plane) and **Server 2**
+(AURA Brain: inference + object storage). Clients only ever talk to Server 1;
+it calls Server 2 with the shared internal token.
 
 ```
-App ──HTTPS+JWT──► Server 1 ──Bearer INTERNAL_API_TOKEN──► Server 2 (AI)
-                             └────────────────────────────► Server 3 (storage)
+App ──HTTPS+JWT──► Server 1 ──Bearer INTERNAL_API_TOKEN──► Server 2 /v1/brain/infer
+                             └──Bearer STORAGE_API_TOKEN──► Server 2 /v1/objects
 ```
+
+Server 3 is retired: the object-storage engine now runs inside Server 2, and
+Server 1 points `STORAGE_SERVER_URL` at Server 2.
 
 ## Topology options
 
-| Option | Server 1 | Server 2 | Server 3 |
-|--------|----------|----------|----------|
-| A. All-cloud free | Render | Render + Groq (no GPU) | Render + R2 |
-| B. Hybrid (GPU laptop) | Render/VM | Friend's RTX laptop + tunnel | Render + R2 |
-| C. Single VM | same VM via Docker | same VM via Docker | same VM via Docker |
+| Option | Server 1 | Server 2 |
+|--------|----------|----------|
+| A. All-cloud free | Render | Render + Groq (no GPU) + Render disk or R2 |
+| B. Hybrid (GPU laptop) | Render/VM | Friend's RTX laptop (GGUF) + tunnel |
+| C. Single VM | same VM via Docker | same VM via Docker |
 
 ---
 
 ## Option B - Server 2 on a friend's GPU laptop
 
-### 1. Fit the model in VRAM
+### 1. Run the model on the GPU
 
-A 4B checkpoint in bfloat16 needs ~8 GB; an RTX 4050 laptop has 6 GB. Use
-4-bit quantization:
+The bundled model is `Qwen3.5-0.8B-Q4_K_M.gguf` (~590 MB). It runs on CPU as
+well as GPU; on the RTX 4050, offload every layer to VRAM.
 
 ```bash
 cd server2
 python -m venv .venv && source .venv/bin/activate   # or .venv\Scripts\activate on Windows
-pip install -r requirements.txt -r requirements-4bit.txt
+
+# CPU wheel (works everywhere):
+pip install -r requirements.txt -r requirements-gguf.txt
+# GPU wheel (CUDA, for llama-cpp-python):
+#   CMAKE_ARGS="-DGGML_CUDA=on" FORCE_CMAKE=1 pip install -r requirements.txt -r requirements-gguf.txt
 ```
 
 Create `server2/.env`:
@@ -37,9 +44,16 @@ Create `server2/.env`:
 ```env
 INTERNAL_API_TOKEN=<same strong token as Server 1>
 AURA_SKIP_MODEL_LOAD=0
-MODEL_PATH=/absolute/path/to/Qwen3.5-4B
-LOAD_IN_4BIT=1
-MODEL_NAME=Qwen3.5-4B
+MODEL_PATH=/absolute/path/to/Qwen3.5-0.8B-Q4_K_M.gguf
+MODEL_NAME=Qwen3.5-0.8B
+GGUF_N_GPU_LAYERS=-1
+GGUF_N_CTX=4096
+REPEAT_PENALTY=1.2
+MIN_P=0.05
+STORAGE_BACKEND=local
+STORAGE_DATA_DIR=./data
+STORAGE_DATABASE_URL=sqlite+aiosqlite:///./data/storage.db
+STORAGE_API_TOKEN=<same as Server 1 STORAGE_API_TOKEN>
 ```
 
 Start it:
@@ -48,8 +62,12 @@ Start it:
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8001
 ```
 
-Check `GET http://127.0.0.1:8001/health` - it should report `provider: local`
-and `quantization: 4bit`.
+Check `GET http://127.0.0.1:8001/health` - it should report `provider: gguf`
+and `model: Qwen3.5-0.8B`.
+
+> Use the HF transformers checkpoint instead by pointing `MODEL_PATH` at the
+> model directory (health reports `provider: local`). Small-VRAM 4-bit
+> quantization needs `requirements-4bit.txt` (`LOAD_IN_4BIT=1` / `QUANTIZATION=4bit`).
 
 ### 2. Expose it to Server 1 without port forwarding
 
@@ -71,8 +89,9 @@ In Server 1's environment:
 
 ```env
 AI_SERVER_URL=https://<random>.trycloudflare.com
+STORAGE_SERVER_URL=https://<random>.trycloudflare.com
 INTERNAL_API_TOKEN=<same token>
-AI_SERVER_MODEL=Qwen3.5-4B
+AI_SERVER_MODEL=Qwen3.5-0.8B
 ```
 
 ### 4. Keep the laptop alive
@@ -83,7 +102,9 @@ AI_SERVER_MODEL=Qwen3.5-4B
 
 ### 5. Failover when the laptop is off
 
-Enable the Server 1 external fallback so brain queries still work:
+Storage keeps working (it lives on Server 2 only while the laptop is up; for
+full resilience run a cloud Server 2 as well and split the URLs). Enable the
+Server 1 external fallback so brain queries still work:
 
 ```env
 AI_FALLBACK_ENABLED=true
@@ -100,24 +121,49 @@ are stripped before sending.
 
 ## Option A/C - cloud deployment
 
-`render.yaml` at the repo root defines all three Render services. Create the
-managed services first, then paste their URLs/tokens into the dashboard:
+`render.yaml` at the repo root defines both Render services
+(`aura-server1a-core`, `aura-server2`). Create the datastores first, then paste
+their URLs/tokens into the dashboard secrets listed below.
 
 - Postgres: Neon → `POSTGRES_URL`
 - Redis: Upstash → `REDIS_URL` (`rediss://...`)
 - Qdrant: Qdrant Cloud → `QDRANT_URL`
-- Object storage: Cloudflare R2 (Render free has no persistent disks) → set
-  Server 3 `STORAGE_BACKEND=s3` plus `S3_ENDPOINT_URL`, `S3_BUCKET`,
-  `S3_ACCESS_KEY`, `S3_SECRET_KEY`
+- Object storage: a Render disk at `/var/data` (bundled in `render.yaml`) or
+  Cloudflare R2 → set Server 2 `STORAGE_BACKEND=s3` plus `S3_ENDPOINT_URL`,
+  `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`.
 
 Server 2 in the cloud runs in external-provider mode
-(`AURA_SKIP_MODEL_LOAD=1`) with a Groq key; the 4B model needs a GPU.
+(`AURA_SKIP_MODEL_LOAD=1`) with a Groq key; the local GGUF needs a GPU.
+
+### Exact Render deploy steps
+
+1. Push the code to the target repo (`aura-platform-v2`) and open Render →
+   **New → Blueprint**, pointing at that repo. Render reads `render.yaml` and
+   proposes `aura-server1a-core` and `aura-server2`. (If a service with the old
+   name already exists, do not create a duplicate — rename or reuse it.)
+2. Create Neon Postgres, Upstash Redis and Qdrant Cloud clusters; copy their
+   connection strings.
+3. Deploy `aura-server2` first. Set dashboard secrets:
+   - `INTERNAL_API_TOKEN` = a strong random string
+   - `STORAGE_API_TOKEN` = the same string (or a separate one)
+   - `EXTERNAL_AI_KEY` = your Groq API key
+   Wait for `GET /health` → `provider: external`.
+4. Deploy `aura-server1a-core`. Set dashboard secrets:
+   - `POSTGRES_URL`, `REDIS_URL`, `QDRANT_URL` from step 2
+   - `JWT_SECRET_KEY` = a new strong random string
+   - `INTERNAL_API_TOKEN`, `STORAGE_API_TOKEN` = the values from step 3
+   - `AI_SERVER_URL` = the internal URL of `aura-server2` (Render dashboard →
+     your server2 service → Connect → Internal URL)
+   - `STORAGE_SERVER_URL` = the same internal URL
+   - `CORS_ALLOWED_ORIGINS` = your frontend origin(s)
+   Its start command runs `alembic upgrade head` before booting.
+5. Verify: `GET https://<server1>/api/v1/health` returns `status: healthy` with
+   `ai_server` and `storage_server` connected.
 
 For a single VM use Docker:
 
 ```bash
-cd server1 && docker compose up -d
-cd ../server2 && docker compose up -d
+cd server1 && docker compose up -d --build   # infra + Server 1 + Server 2
 ```
 
 Expose only Server 1's port (8000) publicly, behind a TLS-terminating proxy.
@@ -133,6 +179,8 @@ POST /api/v1/users          # register
 POST /api/v1/auth/login     # -> access_token + refresh_token
 POST /api/v1/brain/query    # Bearer <access_token>
 POST /api/v1/files          # multipart upload, Bearer <access_token>
+GET  /api/v1/apps           # app catalog (public)
+POST /api/v1/apps/me        # authorize an app for this user
 ```
 
 Add the app's origin to `CORS_ALLOWED_ORIGINS` on Server 1. Never ship

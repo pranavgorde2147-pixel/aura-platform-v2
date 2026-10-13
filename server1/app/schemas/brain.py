@@ -87,3 +87,10 @@ class MemoryResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+class MemoryUpdateRequest(BaseModel):
+    """Update an existing memory."""
+
+    content: str | None = Field(default=None, min_length=1, max_length=20000)
+    summary: str | None = Field(default=None, max_length=512)
+    importance: int | None = Field(default=None, ge=0, le=100)

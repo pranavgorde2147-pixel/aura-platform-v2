@@ -1,0 +1,419 @@
+"""AURA application registry and per-user app connection service.
+
+The catalog below is the single source of truth for which applications and
+modules exist (or are planned) in the AURA ecosystem. User connections reuse
+the existing InstalledModule / ModulePermission models; this service never
+talks to app databases directly.
+"""
+
+from __future__ import annotations
+
+import uuid
+
+from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import set_committed_value
+
+from app.models.installed_module import InstalledModule, PlatformType
+from app.models.module_permission import ModulePermission, PermissionAction
+from app.models.user import User
+from app.schemas.apps import AppDefinition, ModulePermissionSpec
+
+
+class AppRegistryError(Exception):
+    """Base error for registry operations."""
+
+
+class UnknownAppError(AppRegistryError):
+    """The requested module slug is not in the catalog."""
+
+
+class AppAlreadyInstalledError(AppRegistryError):
+    """The user already has this app installed/authorized."""
+
+
+CATALOG: dict[str, AppDefinition] = {
+    "aura-core": AppDefinition(
+        slug="aura-core",
+        name="AURA Core",
+        description="Central AURA account/identity and dashboard backend (Server 1).",
+        client_type="web",
+        status="live",
+        platform_type="aura",
+        purpose="Account registration, login, sessions, user identity and app authorization.",
+        needs_from_aura=["identity"],
+        repo_path="server1/",
+        default_permissions=[ModulePermissionSpec(scope="identity", action="read")],
+    ),
+    "brain": AppDefinition(
+        slug="brain",
+        name="Personal AI Brain",
+        description="Primary way to query the user's brain and receive personalized answers.",
+        client_type="web",
+        status="live",
+        platform_type="aura",
+        purpose="Query the user's memory, retrieve context, generate personalized responses.",
+        sends_to_aura=["queries", "feedback"],
+        needs_from_aura=["brain context", "memories", "answers"],
+        queries_brain=True,
+        ingests=True,
+        repo_path="server1/app/api/v1/brain.py",
+        default_permissions=[
+            ModulePermissionSpec(scope="brain", action="read"),
+            ModulePermissionSpec(scope="memory", action="read"),
+            ModulePermissionSpec(scope="memory", action="write"),
+        ],
+    ),
+    "meeting": AppDefinition(
+        slug="meeting",
+        name="AURA Meeting",
+        description="Android meeting app: camera, transcripts, notes, decisions and action items.",
+        client_type="mobile",
+        status="live",
+        platform_type="aura",
+        purpose="Capture meeting content and deliver transcript/summary, decisions and follow-ups to the brain.",
+        sends_to_aura=["meeting transcripts", "summaries", "decisions", "action items"],
+        needs_from_aura=["brain context", "memory retrieval", "notifications"],
+        queries_brain=True,
+        ingests=True,
+        repo_path="meetingapp (Android)",
+        default_permissions=[
+            ModulePermissionSpec(scope="brain", action="read"),
+            ModulePermissionSpec(scope="memory", action="write"),
+            ModulePermissionSpec(scope="files", action="write"),
+        ],
+    ),
+    "memory": AppDefinition(
+        slug="memory",
+        name="Memory Vault",
+        description="Inspect, search, organize, update and forget personal memories.",
+        client_type="internal",
+        status="live",
+        platform_type="aura",
+        purpose="Structured per-user memory operations (facts / interpretations / events).",
+        sends_to_aura=["memory writes"],
+        needs_from_aura=["memory reads", "search"],
+        queries_brain=True,
+        ingests=True,
+        repo_path="server1/app/api/v1/brain.py",
+        default_permissions=[
+            ModulePermissionSpec(scope="memory", action="read"),
+            ModulePermissionSpec(scope="memory", action="write"),
+        ],
+    ),
+    "files": AppDefinition(
+        slug="files",
+        name="AURA Documents / Files",
+        description="User document and file storage with per-owner isolation.",
+        client_type="internal",
+        status="live",
+        platform_type="aura",
+        purpose="Upload, list, download and delete user-authorized documents.",
+        sends_to_aura=["documents"],
+        needs_from_aura=["files", "downloads"],
+        queries_brain=False,
+        ingests=True,
+        repo_path="server1/app/api/v1/files.py",
+        default_permissions=[
+            ModulePermissionSpec(scope="files", action="read"),
+            ModulePermissionSpec(scope="files", action="write"),
+        ],
+    ),
+    "notes": AppDefinition(
+        slug="notes",
+        name="AURA Notes",
+        description="Notes and knowledge capture into the user's vault.",
+        client_type="mobile",
+        status="planned",
+        platform_type="aura",
+        purpose="Capture notes and useful information into the vault.",
+        sends_to_aura=["notes"],
+        needs_from_aura=["vault", "search"],
+        queries_brain=True,
+        ingests=True,
+        default_permissions=[
+            ModulePermissionSpec(scope="memory", action="write"),
+            ModulePermissionSpec(scope="files", action="write"),
+        ],
+    ),
+    "study": AppDefinition(
+        slug="study",
+        name="AURA Study",
+        description="Study/lecture capture organized into knowledge and timeline records.",
+        client_type="mobile",
+        status="planned",
+        platform_type="aura",
+        purpose="Turn study/lecture recordings into knowledge and timeline entries.",
+        sends_to_aura=["lecture notes", "study records"],
+        needs_from_aura=["knowledge", "timeline", "memory"],
+        queries_brain=True,
+        ingests=True,
+        default_permissions=[
+            ModulePermissionSpec(scope="memory", action="write"),
+            ModulePermissionSpec(scope="timeline", action="write"),
+        ],
+    ),
+    "tasks": AppDefinition(
+        slug="tasks",
+        name="AURA Tasks / Planner",
+        description="Tasks and planner consuming action items from meeting and other sources.",
+        client_type="web",
+        status="planned",
+        platform_type="aura",
+        purpose="Action items and follow-ups surfaced from authorized sources.",
+        sends_to_aura=["tasks", "plans"],
+        needs_from_aura=["action items", "memory"],
+        queries_brain=True,
+        ingests=True,
+        default_permissions=[
+            ModulePermissionSpec(scope="memory", action="read"),
+            ModulePermissionSpec(scope="memory", action="write"),
+        ],
+    ),
+    "timeline": AppDefinition(
+        slug="timeline",
+        name="AURA Timeline",
+        description="Shared dated-event capability tracking relevant events across apps.",
+        client_type="internal",
+        status="module",
+        platform_type="aura",
+        purpose="Track dated events that authorized apps contribute.",
+        sends_to_aura=["dated events"],
+        needs_from_aura=["timeline events"],
+        queries_brain=True,
+        ingests=True,
+        default_permissions=[
+            ModulePermissionSpec(scope="timeline", action="read"),
+            ModulePermissionSpec(scope="timeline", action="write"),
+        ],
+    ),
+    "notifications": AppDefinition(
+        slug="notifications",
+        name="AURA Notifications",
+        description="Alerts generated from authorized app events.",
+        client_type="internal",
+        status="planned",
+        platform_type="aura",
+        purpose="Delivery of user notifications triggered by app events.",
+        sends_to_aura=["notification events"],
+        needs_from_aura=["notifications"],
+        queries_brain=False,
+        ingests=True,
+        default_permissions=[ModulePermissionSpec(scope="notifications", action="read")],
+    ),
+    "workflow": AppDefinition(
+        slug="workflow",
+        name="AURA Workflow",
+        description="Coordination of tasks and events across applications.",
+        client_type="internal",
+        status="planned",
+        platform_type="aura",
+        purpose="Orchestrate workflow steps across authorized apps.",
+        sends_to_aura=["workflow events"],
+        needs_from_aura=["workflow", "tasks"],
+        queries_brain=True,
+        ingests=True,
+        default_permissions=[
+            ModulePermissionSpec(scope="workflow", action="read"),
+            ModulePermissionSpec(scope="workflow", action="write"),
+        ],
+    ),
+    "search": AppDefinition(
+        slug="search",
+        name="AURA Search",
+        description="Unified search across memories, files and brain context.",
+        client_type="internal",
+        status="planned",
+        platform_type="aura",
+        purpose="Find relevant memory and documents for a user query.",
+        sends_to_aura=["search queries"],
+        needs_from_aura=["search results"],
+        queries_brain=True,
+        ingests=False,
+        default_permissions=[
+            ModulePermissionSpec(scope="memory", action="read"),
+            ModulePermissionSpec(scope="files", action="read"),
+        ],
+    ),
+    "knowledge-graph": AppDefinition(
+        slug="knowledge-graph",
+        name="AURA Knowledge Graph",
+        description="Links useful entities and facts in the user's brain.",
+        client_type="internal",
+        status="module",
+        platform_type="aura",
+        purpose="Maintain entities and relationships distilled from authorized data.",
+        sends_to_aura=["entities", "relationships"],
+        needs_from_aura=["knowledge retrieval"],
+        queries_brain=True,
+        ingests=True,
+        default_permissions=[
+            ModulePermissionSpec(scope="knowledge", action="read"),
+            ModulePermissionSpec(scope="knowledge", action="write"),
+        ],
+    ),
+    "chronos": AppDefinition(
+        slug="chronos",
+        name="Chronos",
+        description="AURA platform family marker and knowledge collection (chronos_knowledge).",
+        client_type="internal",
+        status="module",
+        platform_type="chronos",
+        purpose="Platform-family capability reserved for Chronos apps/modules.",
+        sends_to_aura=["chronos events"],
+        needs_from_aura=["chronos knowledge"],
+        queries_brain=True,
+        ingests=True,
+        default_permissions=[
+            ModulePermissionSpec(scope="knowledge", action="read"),
+            ModulePermissionSpec(scope="timeline", action="write"),
+        ],
+    ),
+    "health": AppDefinition(
+        slug="health",
+        name="AURA Health / Wellness",
+        description="Possible future integration for wellness events (requires product confirmation).",
+        client_type="mobile",
+        status="future",
+        platform_type="aura",
+        purpose="Optional wellness event intake; only collect health data with user consent.",
+        sends_to_aura=["wellness events"],
+        needs_from_aura=["notifications", "memory"],
+        queries_brain=True,
+        ingests=True,
+        default_permissions=[
+            ModulePermissionSpec(scope="memory", action="write"),
+            ModulePermissionSpec(scope="notifications", action="read"),
+        ],
+    ),
+}
+
+
+def list_catalog() -> list[AppDefinition]:
+    """Return the complete app catalog sorted by slug."""
+    return [CATALOG[slug] for slug in sorted(CATALOG)]
+
+
+def get_catalog_app(slug: str) -> AppDefinition | None:
+    """Return one catalog entry, or None if unknown."""
+    return CATALOG.get(slug)
+
+
+class AppConnectionService:
+    """Service for managing a user's authorized app connections."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def list_connections(self, user: User) -> list[InstalledModule]:
+        result = await self.session.execute(
+            select(InstalledModule)
+            .where(InstalledModule.user_id == user.id)
+            .order_by(InstalledModule.created_at.desc())
+        )
+        return list(result.scalars().all())
+
+    async def get_connection(self, user: User, module_id: uuid.UUID) -> InstalledModule | None:
+        result = await self.session.execute(
+            select(InstalledModule).where(
+                InstalledModule.id == module_id,
+                InstalledModule.user_id == user.id,
+            )
+        )
+        return result.scalars().first()
+
+    async def install(
+        self,
+        user: User,
+        slug: str,
+        permissions: list[ModulePermissionSpec] | None = None,
+    ) -> InstalledModule:
+        """Authorize an app for the user, granting its default permissions."""
+        app = get_catalog_app(slug)
+        if app is None:
+            raise UnknownAppError(f"Unknown app slug: {slug}")
+
+        existing = await self.session.execute(
+            select(InstalledModule).where(
+                InstalledModule.user_id == user.id,
+                InstalledModule.module_slug == slug,
+            )
+        )
+        if existing.scalars().first() is not None:
+            raise AppAlreadyInstalledError(f"App already connected: {slug}")
+
+        module = InstalledModule(
+            user_id=user.id,
+            module_slug=app.slug,
+            module_name=app.name,
+            platform_type=PlatformType(app.platform_type),
+            is_active=True,
+        )
+        self.session.add(module)
+        await self.session.flush()
+
+        granted = permissions if permissions is not None else _default_permissions(app)
+        await self._replace_permissions(user, module, granted)
+        await self.session.commit()
+        return module
+
+    async def update_connection(
+        self,
+        user: User,
+        module_id: uuid.UUID,
+        is_active: bool | None = None,
+        permissions: list[ModulePermissionSpec] | None = None,
+    ) -> InstalledModule | None:
+        """Update activation state and/or replace granted permissions."""
+        module = await self.get_connection(user, module_id)
+        if module is None:
+            return None
+
+        if is_active is not None:
+            module.is_active = bool(is_active)
+        if permissions is not None:
+            await self._replace_permissions(user, module, permissions)
+        await self.session.commit()
+        return module
+
+    async def revoke(self, user: User, module_id: uuid.UUID) -> bool:
+        """Revoke the user's connection to an app (soft-delete is not used)."""
+        module = await self.get_connection(user, module_id)
+        if module is None:
+            return False
+        await self.session.delete(module)
+        await self.session.commit()
+        return True
+
+    async def _replace_permissions(
+        self,
+        user: User,
+        module: InstalledModule,
+        permissions: list[ModulePermissionSpec],
+    ) -> None:
+        """Replace the module's permission set and persist it.
+
+        Uses ``set_committed_value`` to populate the in-memory relationship
+        without triggering an implicit lazy load (which is not allowed on async
+        sessions), so the caller can serialise the module directly.
+        """
+        await self.session.execute(
+            delete(ModulePermission).where(ModulePermission.installed_module_id == module.id)
+        )
+        granted = [
+            ModulePermission(
+                user_id=user.id,
+                installed_module_id=module.id,
+                scope=spec.scope,
+                permission=PermissionAction(spec.action),
+            )
+            for spec in permissions
+        ]
+        for permission in granted:
+            self.session.add(permission)
+        set_committed_value(module, "module_permissions", granted)
+        await self.session.flush()
+
+
+def _default_permissions(app: AppDefinition) -> list[ModulePermissionSpec]:
+    return list(app.default_permissions)

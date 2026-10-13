@@ -14,6 +14,10 @@ import torch
 from fastapi import FastAPI, Header, HTTPException, Request
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from app.external_proxy import call_external_model
+from app.api.objects import router as objects_router
+from app.api.storage_health import router as storage_health_router
+from app.storage_db import dispose_engine as dispose_storage_engine
+from app.storage_db import init_models as init_storage_models
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 try:
@@ -103,6 +107,13 @@ def _build_quantization_config(mode: str):
 
 app = FastAPI(title="AURA Server 2", version="0.1.0")
 
+# Object storage endpoints (formerly Server 3). Mounted at /v1/objects so
+# Server 1's existing StorageClient contract keeps working unchanged once its
+# STORAGE_SERVER_URL points at Server 2. Storage health lives under /v1/storage
+# to avoid clashing with the brain's own /health and /ready probes.
+app.include_router(objects_router)
+app.include_router(storage_health_router, prefix="/v1/storage")
+
 
 class ModelRuntime:
     def __init__(self, model_path: Path) -> None:
@@ -159,6 +170,86 @@ class ModelRuntime:
 MODEL_RUNTIME = ModelRuntime(_model_path())
 
 
+class GGUFRuntime:
+    """Runtime for GGUF checkpoints loaded through llama.cpp.
+
+    llama-cpp-python is an optional dependency (see requirements-gguf.txt). It
+    is imported lazily so that environments that only serve transformers
+    checkpoints never need it installed.
+    """
+
+    provider = "gguf"
+
+    def __init__(self, model_path: Path) -> None:
+        self.model_path = model_path
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.model = None
+        self.tokenizer = None
+        self.ready = False
+        self.load_error: Exception | None = None
+        self.quantization: str | None = None
+
+    def load(self) -> None:
+        if not self.model_path.exists():
+            raise FileNotFoundError(f"Model file missing: {self.model_path}")
+        try:
+            from llama_cpp import Llama
+        except ImportError as exc:
+            raise RuntimeError(
+                "llama-cpp-python is not installed; install server2/requirements-gguf.txt to serve GGUF checkpoints"
+            ) from exc
+
+        n_gpu_layers = int(os.getenv("GGUF_N_GPU_LAYERS", "-1" if self.device == "cuda" else "0"))
+        n_ctx = int(os.getenv("GGUF_N_CTX", "2048"))
+        n_threads = max(1, min(8, os.cpu_count() or 1))
+
+        self.model = Llama(
+            model_path=str(self.model_path),
+            n_ctx=n_ctx,
+            n_threads=n_threads,
+            n_gpu_layers=n_gpu_layers,
+            verbose=False,
+        )
+        try:
+            quant = str(self.model_path.name).rsplit("-", 1)[-1].split(".")[0]
+            if quant and not quant.lower().startswith(("q", "iq", "fp")):
+                quant = None
+        except Exception:  # pragma: no cover - cosmetic
+            quant = None
+        self.quantization = quant or "gguf"
+        self.ready = True
+
+    def generate(self, prompt: str, *, max_new_tokens: int, temperature: float, top_p: float) -> str:
+        if self.model is None or not self.ready:
+            raise RuntimeError("GGUF model is not loaded")
+        result = self.model(
+            prompt,
+            max_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            repeat_penalty=float(os.getenv("REPEAT_PENALTY", "1.2")),
+            min_p=float(os.getenv("MIN_P", "0.05")),
+            echo=False,
+        )
+        if isinstance(result, dict):
+            choices = result.get("choices") or []
+            if choices and isinstance(choices[0], dict):
+                return str(choices[0].get("text", "")).strip()
+            return ""
+        return str(result).strip()
+
+
+def _is_gguf_path(path: Path) -> bool:
+    """A GGUF checkpoint is a single file with a .gguf suffix."""
+    return path.is_file() and path.suffix.lower() == ".gguf"
+
+
+def _build_runtime(path: Path):
+    if _is_gguf_path(path):
+        return GGUFRuntime(path)
+    return ModelRuntime(path)
+
+
 def _is_valid_uuid(value: str | None) -> bool:
     if value is None:
         return False
@@ -169,11 +260,11 @@ def _is_valid_uuid(value: str | None) -> bool:
         return False
 
 
-def _get_runtime() -> ModelRuntime:
+def _get_runtime():
     path = _model_path()
     global MODEL_RUNTIME
-    if MODEL_RUNTIME.model_path != path:
-        MODEL_RUNTIME = ModelRuntime(path)
+    if MODEL_RUNTIME.model_path != path or type(MODEL_RUNTIME).__name__ != ("GGUFRuntime" if _is_gguf_path(path) else "ModelRuntime"):
+        MODEL_RUNTIME = _build_runtime(path)
     if _skip_model_load():
         return MODEL_RUNTIME
     if not MODEL_RUNTIME.ready and MODEL_RUNTIME.load_error is None:
@@ -195,6 +286,25 @@ def startup_runtime() -> None:
         MODEL_RUNTIME.load_error = exc
 
 
+@app.on_event("startup")
+async def startup_storage() -> None:
+    """Create storage metadata tables. Failure must not block brain inference."""
+    try:
+        await init_storage_models()
+    except Exception as exc:  # pragma: no cover - runtime guard
+        import logging
+
+        logging.getLogger(__name__).warning("Storage metadata init failed: %s", exc)
+
+
+@app.on_event("shutdown")
+async def shutdown_storage() -> None:
+    try:
+        await dispose_storage_engine()
+    except Exception:  # pragma: no cover - shutdown guard
+        pass
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     if _skip_model_load():
@@ -206,10 +316,15 @@ def health() -> dict[str, str]:
     try:
         runtime = _get_runtime()
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Qwen3.5-4B model failed to load: {exc}") from exc
+        raise HTTPException(status_code=503, detail=f"{model_name} model failed to load: {exc}") from exc
     if runtime.ready:
-        return {"status": "ok", "provider": "local", "model": model_name, "quantization": runtime.quantization or "none"}
-    raise HTTPException(status_code=503, detail="Qwen3.5-4B model is unavailable")
+        return {
+            "status": "ok",
+            "provider": getattr(runtime, "provider", "local"),
+            "model": model_name,
+            "quantization": runtime.quantization or "none",
+        }
+    raise HTTPException(status_code=503, detail=f"{model_name} model is unavailable")
 
 
 @app.get("/ready")
@@ -221,11 +336,14 @@ def ready() -> dict[str, bool | str]:
         return {"status": "ready", "model": _model_name(), "provider": "local", "model_loaded": True}
     model_name = _model_name()
     model_ready = False
+    provider = "local"
     try:
-        model_ready = _get_runtime().ready
+        runtime = _get_runtime()
+        model_ready = runtime.ready
+        provider = getattr(runtime, "provider", "local")
     except Exception:
         model_ready = False
-    return {"status": "ready" if model_ready else "not_ready", "model": model_name, "provider": "local", "model_loaded": model_ready}
+    return {"status": "ready" if model_ready else "not_ready", "model": model_name, "provider": provider, "model_loaded": model_ready}
 
 
 def _build_prompt(query: str, context: dict[str, Any]) -> str:
@@ -382,33 +500,41 @@ async def brain_infer(request: Request, authorization: str | None = Header(defau
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Qwen3.5-4B model is unavailable: {exc}") from exc
 
-    if not runtime.ready or runtime.model is None or runtime.tokenizer is None:
+    if not runtime.ready or runtime.model is None:
         raise HTTPException(status_code=503, detail="Qwen3.5-4B model is unavailable")
 
     prompt = _build_prompt(query.strip(), context)
     start = time.perf_counter()
-    inputs = runtime.tokenizer(prompt, return_tensors="pt")
-    inputs = {k: v.to(runtime.device) for k, v in inputs.items()}
 
-    # end of local-model flow continues below
-
-    with torch.inference_mode():
-        generated = runtime.model.generate(
-            **inputs,
+    if isinstance(runtime, GGUFRuntime):
+        response_text = runtime.generate(
+            prompt,
             max_new_tokens=int(os.getenv("MAX_NEW_TOKENS", "96")),
-            do_sample=False,
             temperature=float(os.getenv("TEMPERATURE", "0.2")),
             top_p=float(os.getenv("TOP_P", "0.8")),
-            pad_token_id=runtime.tokenizer.eos_token_id,
-            eos_token_id=runtime.tokenizer.eos_token_id,
         )
+        generated_tokens = len(response_text.split())
+    else:
+        inputs = runtime.tokenizer(prompt, return_tensors="pt")
+        inputs = {k: v.to(runtime.device) for k, v in inputs.items()}
 
-    input_tokens = inputs["input_ids"].shape[1]
-    generated_tokens = generated.shape[1] - input_tokens
-    response_text = runtime.tokenizer.decode(
-        generated[0][input_tokens:],
-        skip_special_tokens=True,
-    ).strip()
+        with torch.inference_mode():
+            generated = runtime.model.generate(
+                **inputs,
+                max_new_tokens=int(os.getenv("MAX_NEW_TOKENS", "96")),
+                do_sample=False,
+                temperature=float(os.getenv("TEMPERATURE", "0.2")),
+                top_p=float(os.getenv("TOP_P", "0.8")),
+                pad_token_id=runtime.tokenizer.eos_token_id,
+                eos_token_id=runtime.tokenizer.eos_token_id,
+            )
+
+        input_tokens = inputs["input_ids"].shape[1]
+        generated_tokens = generated.shape[1] - input_tokens
+        response_text = runtime.tokenizer.decode(
+            generated[0][input_tokens:],
+            skip_special_tokens=True,
+        ).strip()
 
     latency_ms = int((time.perf_counter() - start) * 1000)
     if not response_text:

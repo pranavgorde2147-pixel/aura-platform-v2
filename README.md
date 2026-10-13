@@ -1,7 +1,8 @@
 # AURA Platform
 
-A three-service AI platform: a public backend with a persistent "Personal Brain",
-an internal LLM inference service, and an internal object-storage engine.
+A two-service AI platform: a public backend with a persistent "Personal Brain"
+(Server 1), and an internal AURA Brain service (Server 2) that provides LLM
+inference and object storage.
 
 This README is the single source of truth for connecting an app, deploying the
 services, and changing the brain model.
@@ -13,51 +14,56 @@ services, and changing the brain model.
 ```
                     ┌────────────────────────────────────────────┐
    Your app  ──JWT─►│  Server 1  (public, port 8000)             │
- (web/mobile)       │  auth · users · brain · files · health     │
+ (web/mobile)       │  auth · users · brain · files · apps       │
                     └───────┬───────────────────────┬────────────┘
                             │ Bearer <INTERNAL_API_TOKEN>        │ Bearer <STORAGE_API_TOKEN>
                             ▼                                    ▼
-                   ┌──────────────────┐              ┌──────────────────────┐
-                   │ Server 2 (8001)  │              │ Server 3 (8002)      │
-                   │ Qwen3.5-4B / LLM │              │ object storage       │
-                   └──────────────────┘              └──────────────────────┘
-                            │                                    
+                   ┌───────────────────────────────────────────────────────┐
+                   │ Server 2 (8001)  AURA Brain                            │
+                   │  /v1/brain/infer  inference                            │
+                   │  /v1/objects      object storage (formerly Server 3)   │
+                   └───────────────────────────────────────────────────────┘
+                            │
                    Postgres · Redis · Qdrant (Server 1 infra)
 ```
 
-Only **Server 1** is user-facing. Server 2 and Server 3 are internal and require
-a shared bearer token; your app never talks to them directly.
+Only **Server 1** is user-facing. Server 2 is internal and requires a shared
+bearer token; your app never talks to it directly.
 
 | Service | Directory | Port | Public? | Role |
 |---------|-----------|------|---------|------|
-| Server 1 | `server1/` | 8000 | Yes | Auth, users, Personal Brain, file API, health |
-| Server 2 | `server2/` | 8001 | No | LLM inference (`/v1/brain/infer`) |
-| Server 3 | `server3/` | 8002 | No | Object storage (`/v1/objects`) |
+| Server 1 | `server1/` | 8000 | Yes | Auth, users, Personal Brain, file API, app registry, health |
+| Server 2 | `server2/` | 8001 | No | LLM inference (`/v1/brain/infer`) + object storage (`/v1/objects`) |
+| Server 3 | `server3/` | 8002 | No | Legacy standalone storage — reference only, not deployed |
 
 ---
 
 ## 2. Quick start (local, Docker)
 
-Docker Compose starts Postgres, Redis, Qdrant, Server 1 and Server 3 together.
-Server 2 runs separately (needs the model or a Groq key).
+Docker Compose in `server1/` starts Postgres, Redis, Qdrant, Server 1 and
+Server 2 (brain + storage).
 
 ```bash
-# Server 1 + infra + Server 3
+# Server 1 + infra + Server 2 (brain and storage)
 cd server1
 cp .env.example .env            # set real secrets
 docker compose up -d --build
 docker compose exec backend alembic upgrade head
 curl http://localhost:8000/api/v1/health
-
-# Server 2 (external-provider mode if you have no local GPU/model)
-cd ../server2
-cp .env.example .env            # set INTERNAL_API_TOKEN (must match Server 1)
-docker compose up -d --build
 curl http://localhost:8001/health
 ```
 
-> Start Server 1 first: its compose file creates the shared `aura-network` that
-> Servers 2 and 3 join.
+To run Server 2 on a GPU host instead, start it on its own and mount the GGUF
+model read-only:
+
+```bash
+cd server2
+cp .env.example .env            # set INTERNAL_API_TOKEN (must match Server 1)
+MODEL_HOST_PATH=/path/to/models docker compose up -d --build
+```
+
+> The `aura-network` external network is created by either compose file; start
+> whichever service brings it up first.
 
 ### Local dev without Docker
 
@@ -77,9 +83,9 @@ are embedded; point `POSTGRES_URL` at any Postgres.
 | `GET /api/v1/health` | Server 1 unified status | Always 200 |
 | `GET /api/v1/health/live` | Liveness | `{"status":"alive"}` |
 | `GET /api/v1/ready` | Readiness | 503 unless DB+Redis+Qdrant reachable |
-| `GET /health` (S2) | Inference liveness | `provider: local\|external`, `quantization` |
-| `GET /ready` (Server 2) | Model loaded? | 503 until loaded |
-| `GET /health` (Server 3) · `GET /ready` | Storage liveness / readiness | `/ready` enforces DB + backend |
+| `GET /health` (S2) | Inference liveness | `provider: local\|gguf\|external` |
+| `GET /ready` (S2) | Model loaded? | 503 until loaded |
+| `GET /v1/storage/health` · `/v1/storage/ready` (S2) | Storage liveness / readiness | `/ready` enforces DB + backend |
 
 Server 1 `/api/v1/health` shape:
 
@@ -91,7 +97,7 @@ Server 1 `/api/v1/health` shape:
     "database":       {"status": "connected"},
     "redis":          {"status": "connected"},
     "qdrant":         {"status": "connected"},
-    "ai_server":      {"status": "connected", "model": "Qwen3.5-4B"},
+    "ai_server":      {"status": "connected", "model": "Qwen3.5-0.8B"},
     "storage_server": {"status": "connected", "backend": "local"}
   },
   "version": "1.0.0",
@@ -106,9 +112,9 @@ the platform but does not block auth/user operations.
 ## 3. Security model
 
 - **Users** authenticate only at Server 1 (JWT access + refresh tokens).
-- Server 1 forwards the authorized user to Server 3 as `X-Aura-Owner-Id`
-  (a UUID). Server 3 filters every read/list/delete by that owner.
-- Server 2 and Server 3 authenticate via a shared internal bearer token
+- Server 1 forwards the authorized user to the storage API on Server 2 as
+  `X-Aura-Owner-Id` (a UUID). Server 2 filters every read/list/delete by that owner.
+- Server 2 authenticates inference and storage via a shared internal bearer token
   (`INTERNAL_API_TOKEN` / `STORAGE_API_TOKEN`) compared with
   `hmac.compare_digest`.
 - Server 2 strips sensitive context keys before building a prompt:
@@ -172,7 +178,7 @@ Authentication: send `Authorization: Bearer <access_token>` on `(auth)` routes.
   "source": "server2_brain",
   "context_used": true,
   "user_id": "<uuid>",
-  "model": "Qwen3.5-4B",
+  "model": "Qwen3.5-0.8B",
   "latency_ms": 1240,
   "tokens_used": 42,
   "memories_used": [{"id": "...", "kind": "fact", "source": "user", "content": "..."}],
@@ -186,7 +192,7 @@ Memories are labelled **`fact`** (user/app supplied) vs **`interpretation`**
 (AI-generated) vs `event`. Nothing is persisted unless you opt in
 (`persist_interaction=true` or `POST /brain/memory`).
 
-### Files (Server 1 → Server 3 proxy)
+### Files (Server 1 → Server 2 storage API proxy)
 | Method | Path | Body | Notes |
 |--------|------|------|-------|
 | POST | `/files` | multipart `file`, `source_app?` | 201; 413 over limit |
@@ -197,6 +203,20 @@ Memories are labelled **`fact`** (user/app supplied) vs **`interpretation`**
 
 Uploads larger than `MAX_UPLOAD_SIZE_BYTES` (default 50 MiB) return **413**;
 storage failures return **503**.
+
+### Apps (registry + per-user connections)
+| Method | Path | Body | Notes |
+|--------|------|------|-------|
+| GET | `/apps` | – | public catalog (`docs/AURA_APP_INVENTORY.md`) |
+| GET | `/apps/{slug}` | – | public; 404 if unknown |
+| GET | `/apps/me` | – | auth; user's connected apps |
+| POST | `/apps/me` | `{module_slug, permissions?}` | auth; 201; 409 if already connected |
+| GET | `/apps/me/{module_id}` | – | auth; self only |
+| PATCH/PUT | `/apps/me/{module_id}` | `{is_active?, permissions?}` | auth; update/replace |
+| DELETE | `/apps/me/{module_id}` | – | auth; 204 |
+
+Connections use `installed_modules` + `module_permissions` and are always scoped
+to the authenticated user.
 
 ---
 
@@ -210,7 +230,7 @@ Request:
   "query": "…",
   "context": {"user_level": "general", "relevant_context": {}, "safety_constraints": []},
   "request_id": "<uuid, optional>",
-  "model": "Qwen3.5-4B"
+  "model": "Qwen3.5-0.8B"
 }
 ```
 Response: `{model, response, user_id, request_id, status, tokens_used, latency_ms}`.
@@ -218,7 +238,7 @@ Response: `{model, response, user_id, request_id, status, tokens_used, latency_m
 external mode), otherwise **400**.
 Also: `GET /health`, `GET /ready`.
 
-### Server 3 (`/v1/objects`) — bearer `STORAGE_API_TOKEN`, `X-Aura-Owner-Id: <uuid>`
+### Server 2 storage API (`/v1/objects`) — bearer `STORAGE_API_TOKEN`, `X-Aura-Owner-Id: <uuid>`
 | Method | Path | Notes |
 |--------|------|-------|
 | POST | `/v1/objects` | multipart `file`, optional `ai_identity_id`, `source_app` → 201 |
@@ -226,7 +246,7 @@ Also: `GET /health`, `GET /ready`.
 | GET | `/v1/objects/{id}/metadata` | metadata |
 | GET | `/v1/objects/{id}` | download (adds `X-Object-Checksum-Sha256`) |
 | DELETE | `/v1/objects/{id}` | delete |
-Also: `GET /health`, `GET /ready`.
+Also: `GET /v1/storage/health`, `GET /v1/storage/ready`.
 
 `ObjectMetadata`: `{id, owner_id, ai_identity_id, filename, content_type,
 size_bytes, checksum_sha256, storage_backend, source_app, created_at, expires_at}`.
@@ -249,8 +269,8 @@ Alembic migrations in `server1/alembic/`; run `alembic upgrade head`.
 | `timeline` | activity events (e.g. `file.uploaded`) |
 | `devices`, `installed_modules`, `module_permissions` | platform extensions |
 
-Server 3 owns its own metadata table for stored objects (SQLite by default, or
-Postgres via `STORAGE_DATABASE_URL`).
+Server 2's storage API owns its own metadata table for stored objects (SQLite by
+default, or Postgres via `STORAGE_DATABASE_URL`).
 
 ---
 
@@ -268,10 +288,10 @@ Postgres via `STORAGE_DATABASE_URL`).
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | `15` | access token TTL |
 | `REFRESH_TOKEN_EXPIRE_DAYS` | `7` | refresh token TTL |
 | `AI_SERVER_URL` | `http://localhost:8001` | Server 2 base URL (use `http://aura-server2:8001` in Docker) |
-| `AI_SERVER_MODEL` | `Qwen3.5-4B` | model id sent to Server 2 |
+| `AI_SERVER_MODEL` | `Qwen3.5-0.8B` | model id sent to Server 2 |
 | `INTERNAL_API_TOKEN` | – | shared with Server 2 |
-| `STORAGE_SERVER_URL` | `http://localhost:8002` | Server 3 base URL (use `http://aura-server3:8002` in Docker) |
-| `STORAGE_API_TOKEN` | – | shared with Server 3 (falls back to `INTERNAL_API_TOKEN`) |
+| `STORAGE_SERVER_URL` | `http://localhost:8001` | Server 2 storage base URL (use `http://aura-server2:8001` in Docker) |
+| `STORAGE_API_TOKEN` | – | shared with Server 2 storage (falls back to `INTERNAL_API_TOKEN`) |
 | `CORS_ALLOWED_ORIGINS` | `http://localhost:3000,http://localhost:5173` | comma-separated or JSON array |
 | `MAX_UPLOAD_SIZE_BYTES` | `52428800` | upload limit |
 | `AI_FALLBACK_ENABLED` | `false` | answer via external provider when Server 2 is down |
@@ -283,27 +303,28 @@ Postgres via `STORAGE_DATABASE_URL`).
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `INTERNAL_API_TOKEN` | – | **must match Server 1** |
-| `MODEL_NAME` | `Qwen3.5-4B` | model id (must match `AI_SERVER_MODEL`) |
-| `MODEL_PATH` | `/models/Qwen3.5-4B` | local checkpoint dir |
+| `MODEL_NAME` | `Qwen3.5-0.8B` | model id (must match `AI_SERVER_MODEL`) |
+| `MODEL_PATH` | `/models/Qwen3.5-0.8B-Q4_K_M.gguf` | local checkpoint (GGUF or HF dir) |
 | `AURA_SKIP_MODEL_LOAD` | `false` | `1` = don't load local model (external/test mode) |
 | `EXTERNAL_AI_URL` | – | OpenAI-compatible base (Groq) |
 | `EXTERNAL_AI_KEY` | – | Groq key (or `GROQ_API_KEY`) |
 | `EXTERNAL_MODEL` | `llama-3.1-8b-instant` | external model id |
 | `MAX_NEW_TOKENS` / `TEMPERATURE` / `TOP_P` | `512`/`0.7`/`0.9` | generation params |
+| `GGUF_N_GPU_LAYERS` / `GGUF_N_CTX` | `-1`/`4096` | GGUF offload layers / context |
+| `REPEAT_PENALTY` / `MIN_P` | `1.2`/`0.05` | GGUF sampling (resolves echo loops) |
 | `LOAD_IN_4BIT` / `LOAD_IN_8BIT` | `0` | quantize the local model (small GPUs) |
 | `QUANTIZATION` | – | `4bit`/`8bit`/`none`; overrides the flags |
-
-### Server 3 (`server3/.env`)
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `STORAGE_API_TOKEN` | – | **must match Server 1's `STORAGE_API_TOKEN`** |
 | `STORAGE_BACKEND` | `local` | `local` or `s3` |
-| `STORAGE_DATA_DIR` | `/data` | data root |
-| `STORAGE_LOCAL_ROOT` | `/data/objects` | local object root |
-| `STORAGE_DATABASE_URL` | SQLite under data dir | metadata DB (Postgres supported) |
-| `MAX_UPLOAD_SIZE_BYTES` | `52428800` | upload limit |
-| `ALLOWED_CONTENT_TYPES` | empty | comma allow-list (empty = all) |
+| `STORAGE_DATA_DIR` / `STORAGE_LOCAL_ROOT` | `./data` / `./data/objects` | storage roots |
+| `STORAGE_DATABASE_URL` | SQLite under data dir | storage metadata DB (Postgres supported) |
+| `STORAGE_API_TOKEN` | – | **must match Server 1's `STORAGE_API_TOKEN`** |
+| `MAX_UPLOAD_SIZE_BYTES` / `ALLOWED_CONTENT_TYPES` | `52428800` / empty | upload limit and allow-list |
 | `S3_ENDPOINT_URL` / `S3_BUCKET` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` / `S3_REGION` / `S3_USE_SSL` | – | S3/MinIO/R2 settings |
+
+### Legacy Server 3 (`server3/.env`)
+
+Not deployed. Kept for reference; the same storage code and variables now run
+inside Server 2.
 
 ---
 
@@ -386,38 +407,40 @@ curl -s $BASE/files -H "Authorization: Bearer $TOKEN" -F file=@./notes.txt -F so
 
 ## 9. Deployment
 
-See `DEPLOYMENT.md` for full detail. Summary of the three options:
+See `DEPLOYMENT.md` for full detail. Summary:
 
 ### A. Single VM (Docker) — all services
 ```bash
-cd server1 && docker compose up -d --build
-cd ../server2 && docker compose up -d --build   # then Server 3 comes from server1 compose
+cd server1 && docker compose up -d --build   # infra + Server 1 + Server 2
 ```
 Expose only 8000; terminate TLS with Caddy/nginx in front.
-Set Docker-internal URLs: `AI_SERVER_URL=http://aura-server2:8001`,
-`STORAGE_SERVER_URL=http://aura-server3:8002`.
+Docker-internal URLs are `AI_SERVER_URL=http://aura-server2:8001` and
+`STORAGE_SERVER_URL=http://aura-server2:8001`.
 
 ### B. Render (managed PaaS)
-`render.yaml` defines all three services. Create managed datastores and paste
-their URLs as dashboard secrets:
+`render.yaml` defines two services: `aura-server1a-core` and `aura-server2`.
+Create managed datastores and paste their URLs as dashboard secrets:
 - Postgres → **Neon** (`POSTGRES_URL`)
 - Redis → **Upstash** (`REDIS_URL`)
 - Qdrant → **Qdrant Cloud** (`QDRANT_URL`)
-- Object store → **Cloudflare R2** (`STORAGE_BACKEND=s3`, free tier has no disks)
 
-Server 1's deploy command runs `alembic upgrade head` automatically.
+Server 1's deploy command runs `alembic upgrade head` automatically. Server 2
+runs in external-provider mode (`AURA_SKIP_MODEL_LOAD=1`, Groq) with a Render
+disk at `/var/data` for object storage. If you prefer not to use a disk, set
+`STORAGE_BACKEND=s3` and the `S3_*` variables to use Cloudflare R2.
 
-### C. Server 2 on a laptop GPU + cloud Servers 1 & 3
+### C. Server 2 on a laptop GPU + cloud Server 1
 ```bash
-# on the GPU laptop
-pip install -r server2/requirements-4bit.txt
-LOAD_IN_4BIT=1 AURA_SKIP_MODEL_LOAD=0 python -m uvicorn app.main:app --host 127.0.0.1 --port 8001
+# on the GPU laptop (GGUF Qwen3.5-0.8B runs on a 6 GB RTX 4050)
+pip install -r server2/requirements.txt -r server2/requirements-gguf.txt
+MODEL_PATH=/path/to/Qwen3.5-0.8B-Q4_K_M.gguf AURA_SKIP_MODEL_LOAD=0 \
+  python -m uvicorn app.main:app --host 127.0.0.1 --port 8001
 cloudflared tunnel --url http://127.0.0.1:8001     # public https URL, no port-forward needed
 ```
-Point Server 1 at the tunnel: `AI_SERVER_URL=https://<tunnel>`, and enable
-`AI_FALLBACK_ENABLED=true` so queries survive when the laptop sleeps.
-Keep the laptop awake (disable sleep, lid-close = do nothing) and autostart the
-tunnel + uvicorn on boot.
+Point Server 1 at the tunnel: `AI_SERVER_URL=https://<tunnel>` and
+`STORAGE_SERVER_URL=https://<tunnel>`, then enable `AI_FALLBACK_ENABLED=true` so
+queries survive when the laptop sleeps. Keep the laptop awake (disable sleep,
+lid-close = do nothing) and autostart the tunnel + uvicorn on boot.
 
 ---
 
@@ -427,11 +450,11 @@ Server 2 is the only place a model is defined. There are three ways to change it
 
 ### Option 1 — swap the local checkpoint
 1. Download the new model (a HuggingFace `transformers` checkpoint with
-   `config.json` + safetensors).
+   `config.json` + safetensors) or a quantized `*.gguf` file.
 2. Point Server 2 at it:
    ```env
    MODEL_NAME=<new-model-id>
-   MODEL_PATH=/models/<new-model-dir>
+   MODEL_PATH=/models/<new-model-dir-or-file.gguf>
    AURA_SKIP_MODEL_LOAD=false
    ```
 3. Update Server 1 so the ids match:
@@ -439,10 +462,15 @@ Server 2 is the only place a model is defined. There are three ways to change it
    AI_SERVER_MODEL=<new-model-id>
    ```
 4. Restart Server 2, then Server 1. Verify: `GET http://server2:8001/health`
-   shows `provider: local`.
+   shows `provider: local` (transformers) or `provider: gguf` (GGUF file).
 
 The model id in the `/v1/brain/infer` request must match exactly or Server 2
 returns **400**.
+
+> GGUF: requires `llama-cpp-python>=0.3.36` (install `requirements-gguf.txt`).
+> The bundled Qwen3.5-0.8B Q4_K_M checkpoint uses the `qwen35` architecture,
+> which older llama-cpp-python builds cannot load. Tune with `GGUF_N_GPU_LAYERS`,
+> `GGUF_N_CTX`, `REPEAT_PENALTY` and `MIN_P`.
 
 ### Option 2 — run a non-Qwen model via an external provider
 ```env
@@ -474,7 +502,7 @@ Quantization requires CUDA; on CPU the flag is ignored (full precision).
 ## 11. Testing
 
 ```bash
-# Server 1 (includes real PostgreSQL via pgserver + real Server 3 subprocess)
+# Server 1 (includes real PostgreSQL via pgserver + real storage subprocess)
 cd server1
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q tests
 
@@ -482,7 +510,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q tests
 cd server2
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q tests
 
-# Server 3 (reuses Server 1's venv)
+# Legacy Server 3 (reuses Server 1's venv)
 cd server3
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ../server1/.venv/bin/python -m pytest -q tests
 ```
@@ -499,12 +527,12 @@ present.
 | `/ready` → 503 | Postgres/Redis/Qdrant unreachable; check `services` in `/health` |
 | `brain/query` → `source: server2_error` | Server 2 down or token mismatch; enable `AI_FALLBACK_ENABLED` |
 | Server 2 → 401 | `INTERNAL_API_TOKEN` differs between Server 1 and 2 |
-| Server 3 → 401/503 | `STORAGE_API_TOKEN` mismatch; 503 means Server 3 has no token set |
+| Storage → 401/503 | `STORAGE_API_TOKEN` mismatch; 503 means Server 2 storage has no token set |
 | `brain/query` → 400 | `AI_SERVER_MODEL` ≠ Server 2's model id |
 | File upload → 413 | Exceeds `MAX_UPLOAD_SIZE_BYTES` |
-| File upload → 415 | Content type not in `ALLOWED_CONTENT_TYPES` (Server 3) |
+| File upload → 415 | Content type not in `ALLOWED_CONTENT_TYPES` (Server 2 storage) |
 | Config crash on startup | `CORS_ALLOWED_ORIGINS` malformed (use comma or JSON array) |
-| Disk full / no persistence | Render free has no disks — use `STORAGE_BACKEND=s3` (R2) |
+| Disk full / no persistence | Render disk missing — mount a disk at the storage data dir or use `STORAGE_BACKEND=s3` (R2) |
 
 ---
 
@@ -515,12 +543,15 @@ present.
 ├── README.md            # this file
 ├── DEPLOYMENT.md        # deployment details
 ├── AGENTS.md            # contributor/agent instructions
-├── render.yaml          # Render blueprint (all 3 services)
-├── server1/             # Server 1: FastAPI backend + brain + file API
-├── server2/             # Server 2: LLM inference
-└── server3/             # Server 3: object storage engine
+├── render.yaml          # Render blueprint (2 services)
+├── docs/
+│   └── AURA_APP_INVENTORY.md   # app catalog and connection permissions
+├── server1/             # Server 1: FastAPI backend + brain + file API + app registry
+├── server2/             # Server 2: inference (GGUF/transformers/external) + storage
+└── server3/             # Legacy standalone storage engine (reference only)
 ```
 
 > Not-yet-verified in a Docker/GPU environment: `docker compose` orchestration
-> and real local Qwen inference (no GPU/checkpoint in the dev workspace). All
-> logic is covered by unit + live integration tests on real Postgres/Server 3.
+> and 4B local inference (no Docker/GPU/4B checkpoint in the dev workspace). The
+> GGUF Qwen3.5-0.8B model *was* verified on CPU, and all logic is covered by
+> unit + live integration tests on real Postgres and the real storage engine.
