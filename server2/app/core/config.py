@@ -14,7 +14,7 @@ class Config:
     SERVICE_NAME: str = "AURA Personal Brain"
     SERVICE_VERSION: str = "0.1.0"
     HOST: str = os.getenv("AURA_HOST", "0.0.0.0")
-    PORT: int = int(os.getenv("AURA_PORT", "8002"))
+    PORT: int = int(os.getenv("AURA_PORT", "8001"))
 
     # Model settings
     MODEL_NAME: str = "Qwen3.5-4B"
@@ -45,6 +45,19 @@ class Config:
     TOP_P: float = float(os.getenv("AURA_TOP_P", "0.9"))
     TOP_K: int = int(os.getenv("AURA_TOP_K", "50"))
 
+    # Internal auth token (must match Server 1's INTERNAL_API_TOKEN)
+    INTERNAL_API_TOKEN: Optional[str] = os.getenv(
+        "INTERNAL_API_TOKEN", os.getenv("AURA_SERVICE_TOKEN")
+    )
+
+    # External LLM fallback
+    EXTERNAL_AI_URL: Optional[str] = os.getenv("EXTERNAL_AI_URL")
+    EXTERNAL_AI_KEY: Optional[str] = os.getenv("EXTERNAL_AI_KEY") or os.getenv("GROQ_API_KEY")
+    EXTERNAL_MODEL: str = os.getenv("EXTERNAL_MODEL", "llama-3.1-8b-instant")
+
+    # Skip loading the local checkpoint (tests / external fallback mode)
+    SKIP_MODEL_LOAD: bool = os.getenv("AURA_SKIP_MODEL_LOAD", "false").lower() in {"1", "true", "yes"}
+
     # Development/Testing
     DEBUG: bool = os.getenv("AURA_DEBUG", "false").lower() == "true"
     USE_MOCK_MODEL: bool = os.getenv("AURA_USE_MOCK_MODEL", "false").lower() == "true"
@@ -66,3 +79,6 @@ class Config:
 
 # For backward compatibility
 Settings = Config
+
+# Module-level convenience instance used by older imports.
+settings = Config()

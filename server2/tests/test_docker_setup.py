@@ -1,36 +1,43 @@
+"""Validate the container build/deploy configuration without assuming a host
+model checkpoint is present. The model mount itself is checked separately and
+skipped when the checkpoint is unavailable (e.g. CI or non-GPU dev machines)."""
+
 import os
-import subprocess
 from pathlib import Path
 
+import pytest
 
-def test_model_mount_exists_on_host():
-    model_dir = Path('/home/pranav_gorde/aura/server2/models/Qwen3.5-4B')
-    assert model_dir.exists(), 'Host model directory is missing'
-    assert (model_dir / 'config.json').exists(), 'Qwen config.json is missing from host mount source'
+REPO_ROOT = Path(__file__).resolve().parents[1]
+MODEL_DIR = Path(os.getenv("MODEL_PATH", REPO_ROOT / "models" / "Qwen3.5-4B"))
+
+
+@pytest.mark.skipif(not (MODEL_DIR / "config.json").exists(), reason="local model checkpoint not present")
+def test_model_checkpoint_layout():
+    assert MODEL_DIR.exists()
+    assert (MODEL_DIR / "config.json").exists()
 
 
 def test_no_model_load_requirement():
-    assert 'Qwen3.5-4B' in os.getenv('MODEL_NAME', 'Qwen3.5-4B')
-    assert Path('/models/Qwen3.5-4B').exists() is False or True
+    assert "Qwen3.5-4B" in os.getenv("MODEL_NAME", "Qwen3.5-4B")
 
 
 def test_dockerfile_includes_only_app_files():
-    dockerfile = Path('/home/pranav_gorde/aura/server2/Dockerfile').read_text()
-    assert 'requirements.txt' in dockerfile
-    assert 'COPY app' in dockerfile
-    assert 'COPY tests' in dockerfile
-    assert 'COPY models' not in dockerfile.lower()
-    assert '/models/' in dockerfile.lower()
+    dockerfile = (REPO_ROOT / "Dockerfile").read_text()
+    assert "requirements.txt" in dockerfile
+    assert "COPY app" in dockerfile
+    assert "COPY tests" in dockerfile
+    assert "COPY models" not in dockerfile
+    assert "/models/" in dockerfile
 
 
 def test_docker_compose_uses_read_only_model_mount():
-    compose_path = Path('/home/pranav_gorde/aura/server2/docker-compose.yml')
-    text = compose_path.read_text()
-    assert '8001:8001' in text
-    assert '/models/Qwen3.5-4B:ro' in text
-    assert 'Qwen3.5-4B' in text
+    text = (REPO_ROOT / "docker-compose.yml").read_text()
+    assert "8001:8001" in text
+    assert "/models/Qwen3.5-4B:ro" in text
+    assert "Qwen3.5-4B" in text
+    assert "/home/pranav_gorde" not in text
 
 
 def test_dockerignore_excludes_model_directory():
-    dockerignore = Path('/home/pranav_gorde/aura/server2/.dockerignore').read_text()
-    assert 'models/' in dockerignore
+    dockerignore = (REPO_ROOT / ".dockerignore").read_text()
+    assert "models/" in dockerignore

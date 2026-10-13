@@ -1,0 +1,9 @@
+# Extra dependencies for running the local Qwen checkpoint in 4-bit/8-bit on a
+# small-VRAM CUDA GPU (e.g. a 6 GB laptop RTX 4050). Install on top of
+# requirements.txt:
+#
+#   pip install -r requirements.txt -r requirements-4bit.txt
+#
+# Then set LOAD_IN_4BIT=1 (and AURA_SKIP_MODEL_LOAD=0) before starting Server 2.
+bitsandbytes>=0.44.0
+accelerate>=0.34.0

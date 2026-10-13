@@ -1,0 +1,323 @@
+"""Initial migration creating core tables.
+
+Revision ID: 001_initial
+Revises: 
+Create Date: 2026-08-26 20:20:00.000000
+
+"""
+from alembic import op
+import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
+
+# revision identifiers, used by Alembic.
+revision = '001_initial'
+down_revision = None
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    # Create users table
+    op.create_table(
+        'users',
+        sa.Column('id', postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+        sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+        sa.Column('email', sa.String(length=255), nullable=False),
+        sa.Column('password_hash', sa.String(length=255), nullable=False),
+        sa.Column('full_name', sa.String(length=255), nullable=True),
+        sa.Column('is_active', sa.Boolean(), nullable=False),
+        sa.Column('status', sa.Enum('active', 'inactive', 'suspended', name='userstatus', native_enum=False), nullable=False),
+        sa.Column('last_login_at', sa.DateTime(timezone=True), nullable=True),
+        sa.Column('email_verified_at', sa.DateTime(timezone=True), nullable=True),
+        sa.PrimaryKeyConstraint('id'),
+        sa.UniqueConstraint('email', name='uq_users_email'),
+    )
+    op.create_index(op.f('ix_users_email'), 'users', ['email'], unique=False)
+    op.create_index(op.f('ix_users_is_active'), 'users', ['is_active'], unique=False)
+
+    # Create devices table
+    op.create_table(
+        'devices',
+        sa.Column('id', postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+        sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+        sa.Column('user_id', postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column('device_uuid', postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column('device_name', sa.String(length=255), nullable=True),
+        sa.Column('device_type', sa.Enum('mobile', 'desktop', 'tablet', 'watch', name='devicetype', native_enum=False), nullable=False),
+        sa.Column('platform', sa.Enum('ios', 'android', 'web', 'desktop', name='deviceplatform', native_enum=False), nullable=False),
+        sa.Column('app_version', sa.String(length=50), nullable=True),
+        sa.Column('push_token', sa.String(length=512), nullable=True),
+        sa.Column('last_seen_at', sa.DateTime(timezone=True), nullable=True),
+        sa.Column('trusted', sa.Boolean(), nullable=False),
+        sa.Column('revoked', sa.Boolean(), nullable=False),
+        sa.ForeignKeyConstraint(['user_id'], ['users.id'], ondelete='CASCADE'),
+        sa.PrimaryKeyConstraint('id'),
+        sa.UniqueConstraint('device_uuid', name='uq_devices_device_uuid'),
+    )
+    op.create_index(op.f('ix_devices_device_type'), 'devices', ['device_type'], unique=False)
+    op.create_index(op.f('ix_devices_device_uuid'), 'devices', ['device_uuid'], unique=False)
+    op.create_index(op.f('ix_devices_last_seen_at'), 'devices', ['last_seen_at'], unique=False)
+    op.create_index(op.f('ix_devices_platform'), 'devices', ['platform'], unique=False)
+    op.create_index(op.f('ix_devices_push_token'), 'devices', ['push_token'], unique=False)
+    op.create_index(op.f('ix_devices_revoked'), 'devices', ['revoked'], unique=False)
+    op.create_index(op.f('ix_devices_trusted'), 'devices', ['trusted'], unique=False)
+    op.create_index(op.f('ix_devices_user_id'), 'devices', ['user_id'], unique=False)
+
+    # Create sessions table
+    op.create_table(
+        'sessions',
+        sa.Column('id', postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+        sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+        sa.Column('user_id', postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column('device_id', postgresql.UUID(as_uuid=True), nullable=True),
+        sa.Column('refresh_token_hash', sa.String(length=255), nullable=False),
+        sa.Column('user_agent', sa.String(length=500), nullable=True),
+        sa.Column('ip_address', sa.String(length=45), nullable=True),
+        sa.Column('expires_at', sa.DateTime(timezone=True), nullable=False),
+        sa.Column('revoked_at', sa.DateTime(timezone=True), nullable=True),
+        sa.Column('is_revoked', sa.Boolean(), nullable=False),
+        sa.Column('last_used_at', sa.DateTime(timezone=True), nullable=True),
+        sa.ForeignKeyConstraint(['device_id'], ['devices.id'], ondelete='SET NULL'),
+        sa.ForeignKeyConstraint(['user_id'], ['users.id'], ondelete='CASCADE'),
+        sa.PrimaryKeyConstraint('id'),
+    )
+    op.create_index(op.f('ix_sessions_device_id'), 'sessions', ['device_id'], unique=False)
+    op.create_index(op.f('ix_sessions_expires_at'), 'sessions', ['expires_at'], unique=False)
+    op.create_index(op.f('ix_sessions_is_revoked'), 'sessions', ['is_revoked'], unique=False)
+    op.create_index(op.f('ix_sessions_refresh_token_hash'), 'sessions', ['refresh_token_hash'], unique=False)
+    op.create_index(op.f('ix_sessions_user_id'), 'sessions', ['user_id'], unique=False)
+
+    # Create ai_identities table
+    op.create_table(
+        'ai_identities',
+        sa.Column('id', postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+        sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+        sa.Column('user_id', postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column('ai_uuid', postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column('display_name', sa.String(length=255), nullable=True),
+        sa.Column('status', sa.Enum('active', 'inactive', 'maintenance', name='brainstatus', native_enum=False), nullable=False),
+        sa.Column('is_default', sa.Boolean(), nullable=False),
+        sa.Column('last_active_at', sa.DateTime(timezone=True), nullable=True),
+        sa.ForeignKeyConstraint(['user_id'], ['users.id'], ondelete='CASCADE'),
+        sa.PrimaryKeyConstraint('id'),
+        sa.UniqueConstraint('ai_uuid', name='uq_ai_identities_ai_uuid'),
+        sa.UniqueConstraint('user_id', name='uq_ai_identities_user_id'),
+    )
+    op.create_index(op.f('ix_ai_identities_ai_uuid'), 'ai_identities', ['ai_uuid'], unique=False)
+    op.create_index(op.f('ix_ai_identities_display_name'), 'ai_identities', ['display_name'], unique=False)
+    op.create_index(op.f('ix_ai_identities_is_default'), 'ai_identities', ['is_default'], unique=False)
+    op.create_index(op.f('ix_ai_identities_status'), 'ai_identities', ['status'], unique=False)
+    op.create_index(op.f('ix_ai_identities_user_id'), 'ai_identities', ['user_id'], unique=False)
+
+    # Create personal_ai_brains table
+    op.create_table(
+        'personal_ai_brains',
+        sa.Column('id', postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+        sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+        sa.Column('ai_identity_id', postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column('brain_name', sa.String(length=255), nullable=False),
+        sa.Column('version', sa.String(length=50), nullable=False),
+        sa.Column('state', sa.String(length=50), nullable=True),
+        sa.Column('sync_version', sa.Integer(), nullable=False),
+        sa.Column('last_sync_at', sa.DateTime(timezone=True), nullable=True),
+        sa.Column('status', sa.Enum('active', 'inactive', 'maintenance', name='personalbrainstate', native_enum=False), nullable=False),
+        sa.ForeignKeyConstraint(['ai_identity_id'], ['ai_identities.id'], ondelete='CASCADE'),
+        sa.PrimaryKeyConstraint('id'),
+        sa.UniqueConstraint('ai_identity_id', 'version', name='uq_personal_ai_brains_identity_version'),
+    )
+    op.create_index(op.f('ix_personal_ai_brains_ai_identity_id'), 'personal_ai_brains', ['ai_identity_id'], unique=False)
+    op.create_index(op.f('ix_personal_ai_brains_brain_name'), 'personal_ai_brains', ['brain_name'], unique=False)
+    op.create_index(op.f('ix_personal_ai_brains_state'), 'personal_ai_brains', ['state'], unique=False)
+    op.create_index(op.f('ix_personal_ai_brains_status'), 'personal_ai_brains', ['status'], unique=False)
+    op.create_index(op.f('ix_personal_ai_brains_sync_version'), 'personal_ai_brains', ['sync_version'], unique=False)
+    op.create_index(op.f('ix_personal_ai_brains_version'), 'personal_ai_brains', ['version'], unique=False)
+
+    # Create memory_vault table
+    op.create_table(
+        'memory_vault',
+        sa.Column('id', postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+        sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+        sa.Column('ai_identity_id', postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column('object_reference', sa.String(length=1024), nullable=False),
+        sa.Column('storage_type', sa.String(length=50), nullable=False),
+        sa.Column('encryption_metadata', sa.Text(), nullable=True),
+        sa.Column('checksum', sa.String(length=255), nullable=True),
+        sa.Column('mime_type', sa.String(length=255), nullable=True),
+        sa.Column('file_size_bytes', sa.Integer(), nullable=True),
+        sa.Column('processing_status', sa.String(length=50), nullable=False),
+        sa.ForeignKeyConstraint(['ai_identity_id'], ['ai_identities.id'], ondelete='CASCADE'),
+        sa.PrimaryKeyConstraint('id'),
+        sa.UniqueConstraint('ai_identity_id', name='uq_memory_vault_ai_identity_id'),
+    )
+    op.create_index(op.f('ix_memory_vault_ai_identity_id'), 'memory_vault', ['ai_identity_id'], unique=False)
+    op.create_index(op.f('ix_memory_vault_checksum'), 'memory_vault', ['checksum'], unique=False)
+    op.create_index(op.f('ix_memory_vault_object_reference'), 'memory_vault', ['object_reference'], unique=False)
+    op.create_index(op.f('ix_memory_vault_processing_status'), 'memory_vault', ['processing_status'], unique=False)
+    op.create_index(op.f('ix_memory_vault_storage_type'), 'memory_vault', ['storage_type'], unique=False)
+
+    # Create knowledge_graph table
+    op.create_table(
+        'knowledge_graph',
+        sa.Column('id', postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+        sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+        sa.Column('ai_identity_id', postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column('graph_type', sa.String(length=100), nullable=False),
+        sa.Column('name', sa.String(length=255), nullable=True),
+        sa.Column('graph_metadata', sa.Text(), nullable=True),
+        sa.Column('node_count', sa.Integer(), nullable=False),
+        sa.Column('edge_count', sa.Integer(), nullable=False),
+        sa.Column('status', sa.String(length=50), nullable=False),
+        sa.ForeignKeyConstraint(['ai_identity_id'], ['ai_identities.id'], ondelete='CASCADE'),
+        sa.PrimaryKeyConstraint('id'),
+        sa.UniqueConstraint('ai_identity_id', name='uq_knowledge_graph_ai_identity_id'),
+    )
+    op.create_index(op.f('ix_knowledge_graph_ai_identity_id'), 'knowledge_graph', ['ai_identity_id'], unique=False)
+    op.create_index(op.f('ix_knowledge_graph_graph_type'), 'knowledge_graph', ['graph_type'], unique=False)
+    op.create_index(op.f('ix_knowledge_graph_name'), 'knowledge_graph', ['name'], unique=False)
+    op.create_index(op.f('ix_knowledge_graph_status'), 'knowledge_graph', ['status'], unique=False)
+
+    # Create timeline table
+    op.create_table(
+        'timeline',
+        sa.Column('id', postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+        sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+        sa.Column('ai_identity_id', postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column('occurred_at', sa.DateTime(timezone=True), nullable=False),
+        sa.Column('event_type', sa.String(length=100), nullable=False),
+        sa.Column('resource_type', sa.String(length=100), nullable=True),
+        sa.Column('resource_reference', sa.String(length=1024), nullable=True),
+        sa.Column('summary', sa.Text(), nullable=True),
+        sa.Column('event_metadata', sa.Text(), nullable=True),
+        sa.ForeignKeyConstraint(['ai_identity_id'], ['ai_identities.id'], ondelete='CASCADE'),
+        sa.PrimaryKeyConstraint('id'),
+    )
+    op.create_index(op.f('ix_timeline_ai_identity_id'), 'timeline', ['ai_identity_id'], unique=False)
+    op.create_index(op.f('ix_timeline_event_type'), 'timeline', ['event_type'], unique=False)
+    op.create_index(op.f('ix_timeline_occurred_at'), 'timeline', ['occurred_at'], unique=False)
+    op.create_index(op.f('ix_timeline_resource_type'), 'timeline', ['resource_type'], unique=False)
+
+    # Create installed_modules table
+    op.create_table(
+        'installed_modules',
+        sa.Column('id', postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+        sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+        sa.Column('user_id', postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column('module_slug', sa.String(length=100), nullable=False),
+        sa.Column('module_name', sa.String(length=255), nullable=False),
+        sa.Column('platform_type', sa.Enum('aura', 'chronos', 'shared', name='platformtype', native_enum=False), nullable=False),
+        sa.Column('is_active', sa.Boolean(), nullable=False),
+        sa.ForeignKeyConstraint(['user_id'], ['users.id'], ondelete='CASCADE'),
+        sa.PrimaryKeyConstraint('id'),
+        sa.UniqueConstraint('user_id', 'module_slug', name='uq_installed_modules_user_slug'),
+    )
+    op.create_index(op.f('ix_installed_modules_is_active'), 'installed_modules', ['is_active'], unique=False)
+    op.create_index(op.f('ix_installed_modules_module_slug'), 'installed_modules', ['module_slug'], unique=False)
+    op.create_index(op.f('ix_installed_modules_platform_type'), 'installed_modules', ['platform_type'], unique=False)
+    op.create_index(op.f('ix_installed_modules_user_id'), 'installed_modules', ['user_id'], unique=False)
+
+    # Create module_permissions table
+    op.create_table(
+        'module_permissions',
+        sa.Column('id', postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+        sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+        sa.Column('user_id', postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column('installed_module_id', postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column('scope', sa.String(length=100), nullable=False),
+        sa.Column('permission', sa.Enum('read', 'write', 'delete', 'admin', name='permissionaction', native_enum=False), nullable=False),
+        sa.ForeignKeyConstraint(['installed_module_id'], ['installed_modules.id'], ondelete='CASCADE'),
+        sa.ForeignKeyConstraint(['user_id'], ['users.id'], ondelete='CASCADE'),
+        sa.PrimaryKeyConstraint('id'),
+        sa.UniqueConstraint('user_id', 'installed_module_id', 'scope', name='uq_module_permissions_user_module_scope'),
+    )
+    op.create_index(op.f('ix_module_permissions_installed_module_id'), 'module_permissions', ['installed_module_id'], unique=False)
+    op.create_index(op.f('ix_module_permissions_permission'), 'module_permissions', ['permission'], unique=False)
+    op.create_index(op.f('ix_module_permissions_scope'), 'module_permissions', ['scope'], unique=False)
+    op.create_index(op.f('ix_module_permissions_user_id'), 'module_permissions', ['user_id'], unique=False)
+
+
+def downgrade() -> None:
+    # Drop module_permissions table
+    op.drop_index(op.f('ix_module_permissions_user_id'), table_name='module_permissions')
+    op.drop_index(op.f('ix_module_permissions_scope'), table_name='module_permissions')
+    op.drop_index(op.f('ix_module_permissions_permission'), table_name='module_permissions')
+    op.drop_index(op.f('ix_module_permissions_installed_module_id'), table_name='module_permissions')
+    op.drop_table('module_permissions')
+
+    # Drop installed_modules table
+    op.drop_index(op.f('ix_installed_modules_user_id'), table_name='installed_modules')
+    op.drop_index(op.f('ix_installed_modules_platform_type'), table_name='installed_modules')
+    op.drop_index(op.f('ix_installed_modules_module_slug'), table_name='installed_modules')
+    op.drop_index(op.f('ix_installed_modules_is_active'), table_name='installed_modules')
+    op.drop_table('installed_modules')
+
+    # Drop timeline table
+    op.drop_index(op.f('ix_timeline_resource_type'), table_name='timeline')
+    op.drop_index(op.f('ix_timeline_occurred_at'), table_name='timeline')
+    op.drop_index(op.f('ix_timeline_event_type'), table_name='timeline')
+    op.drop_index(op.f('ix_timeline_ai_identity_id'), table_name='timeline')
+    op.drop_table('timeline')
+
+    # Drop knowledge_graph table
+    op.drop_index(op.f('ix_knowledge_graph_status'), table_name='knowledge_graph')
+    op.drop_index(op.f('ix_knowledge_graph_name'), table_name='knowledge_graph')
+    op.drop_index(op.f('ix_knowledge_graph_graph_type'), table_name='knowledge_graph')
+    op.drop_index(op.f('ix_knowledge_graph_ai_identity_id'), table_name='knowledge_graph')
+    op.drop_table('knowledge_graph')
+
+    # Drop memory_vault table
+    op.drop_index(op.f('ix_memory_vault_storage_type'), table_name='memory_vault')
+    op.drop_index(op.f('ix_memory_vault_processing_status'), table_name='memory_vault')
+    op.drop_index(op.f('ix_memory_vault_object_reference'), table_name='memory_vault')
+    op.drop_index(op.f('ix_memory_vault_checksum'), table_name='memory_vault')
+    op.drop_index(op.f('ix_memory_vault_ai_identity_id'), table_name='memory_vault')
+    op.drop_table('memory_vault')
+
+    # Drop personal_ai_brains table
+    op.drop_index(op.f('ix_personal_ai_brains_sync_version'), table_name='personal_ai_brains')
+    op.drop_index(op.f('ix_personal_ai_brains_status'), table_name='personal_ai_brains')
+    op.drop_index(op.f('ix_personal_ai_brains_state'), table_name='personal_ai_brains')
+    op.drop_index(op.f('ix_personal_ai_brains_brain_name'), table_name='personal_ai_brains')
+    op.drop_index(op.f('ix_personal_ai_brains_ai_identity_id'), table_name='personal_ai_brains')
+    op.drop_table('personal_ai_brains')
+
+    # Drop ai_identities table
+    op.drop_index(op.f('ix_ai_identities_status'), table_name='ai_identities')
+    op.drop_index(op.f('ix_ai_identities_is_default'), table_name='ai_identities')
+    op.drop_index(op.f('ix_ai_identities_display_name'), table_name='ai_identities')
+    op.drop_index(op.f('ix_ai_identities_ai_uuid'), table_name='ai_identities')
+    op.drop_index(op.f('ix_ai_identities_user_id'), table_name='ai_identities')
+    op.drop_table('ai_identities')
+
+    # Drop sessions table
+    op.drop_index(op.f('ix_sessions_user_id'), table_name='sessions')
+    op.drop_index(op.f('ix_sessions_refresh_token_hash'), table_name='sessions')
+    op.drop_index(op.f('ix_sessions_is_revoked'), table_name='sessions')
+    op.drop_index(op.f('ix_sessions_expires_at'), table_name='sessions')
+    op.drop_index(op.f('ix_sessions_device_id'), table_name='sessions')
+    op.drop_table('sessions')
+
+    # Drop devices table
+    op.drop_index(op.f('ix_devices_user_id'), table_name='devices')
+    op.drop_index(op.f('ix_devices_trusted'), table_name='devices')
+    op.drop_index(op.f('ix_devices_revoked'), table_name='devices')
+    op.drop_index(op.f('ix_devices_push_token'), table_name='devices')
+    op.drop_index(op.f('ix_devices_last_seen_at'), table_name='devices')
+    op.drop_index(op.f('ix_devices_platform'), table_name='devices')
+    op.drop_index(op.f('ix_devices_device_type'), table_name='devices')
+    op.drop_index(op.f('ix_devices_device_uuid'), table_name='devices')
+    op.drop_table('devices')
+
+    # Drop users table
+    op.drop_index(op.f('ix_users_is_active'), table_name='users')
+    op.drop_index(op.f('ix_users_email'), table_name='users')
+    op.drop_table('users')

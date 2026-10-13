@@ -28,11 +28,14 @@ def _model_name() -> str:
 
 
 def _model_path() -> Path:
+    # Resolution order: explicit MODEL_PATH, the in-container mount, then the
+    # repo-relative models directory (so local runs need no configuration).
     configured = os.getenv("MODEL_PATH")
+    repo_model = Path(__file__).resolve().parents[1] / "models" / "Qwen3.5-4B"
     candidates = [
         Path(configured) if configured else None,
         Path("/models/Qwen3.5-4B"),
-        Path("/home/pranav_gorde/aura/server2/models/Qwen3.5-4B"),
+        repo_model,
     ]
     for candidate in candidates:
         if candidate is not None and candidate.exists():
@@ -62,6 +65,42 @@ def _external_model_name() -> str:
     return os.getenv("EXTERNAL_MODEL", "gpt-5-mini")
 
 
+def _quantization_mode() -> str | None:
+    """Return the requested weight quantization mode: "4bit", "8bit", or None.
+
+    Lets a small-VRAM GPU (for example a 6 GB RTX 4050 laptop) run the 4B
+    checkpoint in 4-bit instead of OOMing on a full bfloat16 load.
+    """
+    explicit = os.getenv("QUANTIZATION", "").strip().lower()
+    if explicit in {"4bit", "int4", "nf4"}:
+        return "4bit"
+    if explicit in {"8bit", "int8"}:
+        return "8bit"
+    if explicit in {"none", "off", "false", "0"}:
+        return None
+    if os.getenv("LOAD_IN_4BIT", "0").lower() in {"1", "true", "yes", "on"}:
+        return "4bit"
+    if os.getenv("LOAD_IN_8BIT", "0").lower() in {"1", "true", "yes", "on"}:
+        return "8bit"
+    return None
+
+
+def _build_quantization_config(mode: str):
+    """Build a transformers BitsAndBytesConfig for the given quant mode."""
+    from transformers import BitsAndBytesConfig
+
+    if mode == "4bit":
+        return BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+        )
+    if mode == "8bit":
+        return BitsAndBytesConfig(load_in_8bit=True)
+    return None
+
+
 app = FastAPI(title="AURA Server 2", version="0.1.0")
 
 
@@ -73,6 +112,7 @@ class ModelRuntime:
         self.tokenizer = None
         self.ready = False
         self.load_error: Exception | None = None
+        self.quantization: str | None = None
 
     def load(self) -> None:
         if not self.model_path.exists():
@@ -82,14 +122,35 @@ class ModelRuntime:
 
         dtype = torch.bfloat16 if (self.device == "cpu" or self.device == "cuda") and hasattr(torch, "bfloat16") else torch.float32
         self.tokenizer = AutoTokenizer.from_pretrained(str(self.model_path), local_files_only=True)
-        self.model = AutoModelForCausalLM.from_pretrained(
-            str(self.model_path),
-            local_files_only=True,
-            low_cpu_mem_usage=True,
-            torch_dtype=dtype,
-            use_safetensors=True,
-        )
-        self.model.to(self.device)
+
+        quant_mode = _quantization_mode()
+        if quant_mode and self.device != "cuda":
+            # bitsandbytes quantization requires a CUDA device.
+            quant_mode = None
+
+        if quant_mode:
+            # BitsAndBytes models must be placed via device_map and cannot be
+            # moved afterwards with .to().
+            self.model = AutoModelForCausalLM.from_pretrained(
+                str(self.model_path),
+                local_files_only=True,
+                low_cpu_mem_usage=True,
+                use_safetensors=True,
+                quantization_config=_build_quantization_config(quant_mode),
+                device_map="auto",
+            )
+            self.quantization = quant_mode
+        else:
+            self.model = AutoModelForCausalLM.from_pretrained(
+                str(self.model_path),
+                local_files_only=True,
+                low_cpu_mem_usage=True,
+                torch_dtype=dtype,
+                use_safetensors=True,
+            )
+            self.model.to(self.device)
+            self.quantization = None
+
         self.model.eval()
         self.model.config.use_cache = True
         self.ready = True
@@ -147,7 +208,7 @@ def health() -> dict[str, str]:
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Qwen3.5-4B model failed to load: {exc}") from exc
     if runtime.ready:
-        return {"status": "ok", "provider": "local", "model": model_name}
+        return {"status": "ok", "provider": "local", "model": model_name, "quantization": runtime.quantization or "none"}
     raise HTTPException(status_code=503, detail="Qwen3.5-4B model is unavailable")
 
 

@@ -35,7 +35,9 @@ INTERNAL_API_TOKEN=
 AURA_SKIP_MODEL_LOAD=false
 MAX_NEW_TOKENS=256
 TEMPERATURE=0.7
-TOP_P=0.9
+TOP_P=0.95
+LOAD_IN_4BIT=0
+QUANTIZATION=
 ```
 
 Set INTERNAL_API_TOKEN in a local .env file before starting the service. Do not commit any real secret values.
@@ -104,6 +106,21 @@ Response example:
   "latency_ms": 1240
 }
 ```
+
+## Running on a small GPU (4-bit)
+
+A 4B checkpoint in bfloat16 needs ~8 GiB of VRAM and will OOM on a 6 GiB GPU
+such as an RTX 4050 laptop. Install the optional quantization deps and enable
+4-bit loading:
+
+```bash
+pip install -r requirements.txt -r requirements-4bit.txt
+LOAD_IN_4BIT=1 AURA_SKIP_MODEL_LOAD=0 python -m uvicorn app.main:app --host 127.0.0.1 --port 8001
+```
+
+`GET /health` then reports `quantization: 4bit`. `QUANTIZATION=4bit|8bit|none`
+overrides `LOAD_IN_4BIT`/`LOAD_IN_8BIT`. Quantization only takes effect on a
+CUDA device; on CPU the flag is ignored and the model loads in full precision.
 
 ## CPU and RAM notes
 

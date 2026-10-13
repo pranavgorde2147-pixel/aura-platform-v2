@@ -33,4 +33,4 @@ snapshots/
 server2/models/
 
 # Stale git worktree copies
-**/backend.worktrees/
+**/backend.worktrees/server3/data/

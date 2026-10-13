@@ -4,8 +4,8 @@ services:
     name: aura-server1
     runtime: docker
     repo: https://github.com/pranavgorde2147-pixel/aura-platform
-    dockerContext: ./aura-platform/backend
-    dockerfilePath: ./aura-platform/backend/Dockerfile
+    dockerContext: ./server1
+    dockerfilePath: ./server1/Dockerfile
     healthCheckPath: /api/v1/health
     dockerCommand: "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT"
     envVars:
@@ -25,6 +25,10 @@ services:
       - key: INTERNAL_API_TOKEN
         sync: false
       - key: AI_SERVER_URL
+        sync: false
+      - key: STORAGE_SERVER_URL
+        sync: false
+      - key: STORAGE_API_TOKEN
         sync: false
       - key: CORS_ALLOWED_ORIGINS
         sync: false
@@ -58,3 +62,29 @@ services:
         sync: false
       - key: EXTERNAL_AI_KEY
         sync: false
+
+  # ============ Server 3 - Object Storage Engine ============
+  - type: web
+    name: aura-server3
+    runtime: docker
+    repo: https://github.com/pranavgorde2147-pixel/aura-platform
+    dockerContext: ./server3
+    dockerfilePath: ./server3/Dockerfile
+    healthCheckPath: /health
+    dockerCommand: "python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT"
+    envVars:
+      - key: STORAGE_BACKEND
+        value: local
+      - key: STORAGE_DATA_DIR
+        value: /var/data
+      - key: STORAGE_LOCAL_ROOT
+        value: /var/data/objects
+      - key: STORAGE_DATABASE_URL
+        value: sqlite+aiosqlite:////var/data/storage.db
+      # Set values in the Render dashboard (secrets never committed):
+      - key: STORAGE_API_TOKEN
+        sync: false
+    disk:
+      name: aura-storage-data
+      mountPath: /var/data
+      sizeGB: 10

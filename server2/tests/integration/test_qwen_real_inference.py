@@ -1,5 +1,6 @@
 import os
 import uuid
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -8,6 +9,10 @@ from app.main import app
 
 
 @pytest.mark.integration
+@pytest.mark.skipif(
+    os.getenv("AURA_RUN_INTEGRATION") != "1" or not Path("/models/Qwen3.5-4B").exists(),
+    reason="requires a mounted Qwen3.5-4B checkpoint and AURA_RUN_INTEGRATION=1",
+)
 def test_real_qwen_inference_loads_once_and_generates(monkeypatch):
     monkeypatch.setenv("INTERNAL_API_TOKEN", "integration-token")
     monkeypatch.delenv("AURA_SKIP_MODEL_LOAD", raising=False)

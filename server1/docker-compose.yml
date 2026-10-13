@@ -1,0 +1,140 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${BACKEND_IMAGE_NAME:-aura-backend:latest}
+    container_name: ${BACKEND_CONTAINER_NAME:-aura-backend}
+    env_file:
+      - .env
+    environment:
+      APP_NAME: ${APP_NAME:-AURA Backend}
+      APP_VERSION: ${APP_VERSION:-1.0.0}
+      DEBUG: ${DEBUG:-false}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      HOST: ${HOST:-0.0.0.0}
+      PORT: ${BACKEND_PORT:-8000}
+      POSTGRES_URL: ${POSTGRES_URL:-postgresql+psycopg://aura:aura@postgres:5432/aura}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:5173}
+      AI_SERVER_URL: ${AI_SERVER_URL:-http://aura-server2:8001}
+      AI_SERVER_MODEL: ${AI_SERVER_MODEL:-Qwen3.5-4B}
+      STORAGE_SERVER_URL: ${STORAGE_SERVER_URL:-http://aura-server3:8002}
+      STORAGE_API_TOKEN: ${STORAGE_API_TOKEN:-}
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-}
+      MAX_UPLOAD_SIZE_BYTES: ${MAX_UPLOAD_SIZE_BYTES:-52428800}
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      aura-server3:
+        condition: service_healthy
+    networks:
+      - aura-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:${BACKEND_PORT:-8000}/api/v1/health', timeout=2).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    container_name: ${POSTGRES_CONTAINER_NAME:-aura-postgres}
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-aura}
+      POSTGRES_USER: ${POSTGRES_USER:-aura}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aura}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - aura-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aura} -d ${POSTGRES_DB:-aura}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: ${REDIS_IMAGE:-redis:7-alpine}
+    container_name: ${REDIS_CONTAINER_NAME:-aura-redis}
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - aura-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  aura-server3:
+    build:
+      context: ../server3
+      dockerfile: Dockerfile
+    image: ${STORAGE_IMAGE_NAME:-aura-server3:latest}
+    container_name: ${STORAGE_CONTAINER_NAME:-aura-server3}
+    environment:
+      PORT: 8002
+      STORAGE_API_TOKEN: ${STORAGE_API_TOKEN:-${INTERNAL_API_TOKEN:-}}
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-local}
+      STORAGE_DATA_DIR: /data
+      STORAGE_LOCAL_ROOT: /data/objects
+      STORAGE_DATABASE_URL: ${STORAGE_DATABASE_URL:-sqlite+aiosqlite:////data/storage.db}
+    volumes:
+      - storage_data:/data
+    networks:
+      - aura-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=2).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  qdrant:
+    image: ${QDRANT_IMAGE:-qdrant/qdrant:v1.10.1}
+    container_name: ${QDRANT_CONTAINER_NAME:-aura-qdrant}
+    ports:
+      - "${QDRANT_HTTP_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - aura-network
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:${QDRANT_HTTP_PORT:-6333}/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  qdrant_data:
+    driver: local
+  storage_data:
+    driver: local
+
+networks:
+  aura-network:
+    driver: bridge
+    name: aura-network

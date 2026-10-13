@@ -9,18 +9,26 @@ services:
     environment:
       HOST: 0.0.0.0
       PORT: 8001
-      MODEL_NAME: qwen/qwen3.8-27b
+      MODEL_NAME: ${MODEL_NAME:-Qwen3.5-4B}
       MODEL_PATH: /models/Qwen3.5-4B
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-}
-      AURA_SKIP_MODEL_LOAD: ${AURA_SKIP_MODEL_LOAD:-"1"}
+      AURA_SKIP_MODEL_LOAD: ${AURA_SKIP_MODEL_LOAD:-0}
       EXTERNAL_AI_URL: ${EXTERNAL_AI_URL:-}
       EXTERNAL_AI_KEY: ${EXTERNAL_AI_KEY:-}
-      EXTERNAL_MODEL: ${EXTERNAL_MODEL:-qwen/qwen3.8-27b}
+      EXTERNAL_MODEL: ${EXTERNAL_MODEL:-}
     volumes:
-      - /home/pranav_gorde/aura/server2/models/Qwen3.5-4B:/models/Qwen3.5-4B:ro
+      # Host directory holding the Qwen3.5-4B checkpoint. Override with MODEL_HOST_PATH.
+      - ${MODEL_HOST_PATH:-./models/Qwen3.5-4B}:/models/Qwen3.5-4B:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request, sys; r = urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=5); sys.exit(0 if r.status == 200 else 1)"]
       interval: 15s
       timeout: 5s
       retries: 5
       start_period: 30s
+    networks:
+      - aura-network
+
+networks:
+  aura-network:
+    external: true
+    name: aura-network
