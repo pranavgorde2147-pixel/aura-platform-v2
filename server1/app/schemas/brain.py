@@ -38,7 +38,10 @@ class BrainQueryResponse(BaseModel):
     """Response returned by the Personal Brain after processing a query."""
 
     answer: str
-    source: str = "mock_personal_brain_provider"
+    # Provider that produced the answer. Real values include ``server2_brain``,
+    # ``server2_test_mode``, ``external_fallback``, or ``server2_error``; the
+    # ``mock_*`` values are development-only and never indicate real inference.
+    source: str = "unknown"
     context_used: bool = False
     user_id: str | None = None
     model: str | None = None

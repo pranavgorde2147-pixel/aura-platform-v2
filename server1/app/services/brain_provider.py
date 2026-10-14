@@ -166,7 +166,14 @@ class MockGeneralLLMProvider:
 
 
 class MockPersonalVaultProvider:
-    """Minimal development vault abstraction for a future personal-data boundary."""
+    """Development-only no-op vault boundary.
+
+    This provider stores nothing. It exists so the vault boundary can be
+    exercised offline; every reply is explicitly tagged ``development_only`` and
+    carries a ``mock_`` source so it can never be mistaken for a real vault
+    write. Production vault persistence goes through
+    ``MemoryVaultRepository`` in ``PersonalBrainService.record_ingestion``.
+    """
 
     async def get_context_for_user(self, user: User) -> dict[str, Any]:
         return {
@@ -175,12 +182,14 @@ class MockPersonalVaultProvider:
             "knowledge": [],
             "timeline": [],
             "source": "mock_personal_vault_provider",
+            "development_only": True,
         }
 
     async def store_ingestion(self, user: User, payload: dict[str, Any]) -> dict[str, Any]:
         return {
             "user_id": str(user.id),
-            "stored": True,
+            "stored": False,
             "ingestion": payload,
             "source": "mock_personal_vault_provider",
+            "development_only": True,
         }

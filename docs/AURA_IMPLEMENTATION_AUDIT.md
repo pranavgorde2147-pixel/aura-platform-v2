@@ -215,16 +215,25 @@ Classification: registry/permissions **implemented**; concrete app integrations
 
 ## 12. Server 2 dead code / mock surface
 
-- `server2/app/brain/engine.py` (imports `QwenBrainEngine`), 
-  `server2/app/providers/brain_llm.py`, `server2/app/schemas/brain.py` are not
-  imported by `server2/app/main.py` or `storage_app.py` — **dead code**.
-- `server2/app/main.py:_call_external_model` exists alongside
-  `external_proxy.call_external_model` — verify one is unused.
-- `MockPersonalBrainLLMProvider` / `MockPersonalVaultProvider`
-  (`app/services/brain_provider.py`) are selected when `INTERNAL_API_TOKEN` is
-  unset — fine for dev, but conversations can silently be answered by a mock.
+Resolved by Phase F and the placeholder sweep (§18):
 
-Classification: **cleanup required**; mocks must be unmistakable in responses.
+- Removed `server2/app/brain/*`, `server2/app/providers/brain_llm.py`,
+  `server2/app/providers/vault.py`, `server2/app/schemas/brain.py`, and the
+  duplicate `_call_external_model`. `server2/app/providers/` is now an empty,
+  removed package.
+- Remaining Server 2 mocks: inference runs in explicit *test mode*
+  (`provider=test`, `source=server2_test_mode`) only when `AURA_SKIP_MODEL_LOAD`
+  is set and no external provider is configured. Server 1 maps this to
+  `source=server2_test_mode` so canned answers are never presented as real
+  inference.
+- Server 1 mock surface lives in `app/services/brain_provider.py`
+  (`MockPersonalBrainLLMProvider`, `MockGeneralLLMProvider`,
+  `MockPersonalVaultProvider`). It is selected only when `INTERNAL_API_TOKEN` is
+  unset; the service now logs a warning (or an error under
+  `ENVIRONMENT=production`) and the mock vault replies are tagged
+  `development_only` (see §18).
+
+Classification: **resolved**; mocks are unmistakable in responses.
 
 ---
 
@@ -338,3 +347,40 @@ New configuration: `MEMORY_VECTOR_SEARCH_ENABLED` (default true),
 Still open: the broader deployment verification (Phase J). The embedding
 provider is a real but lexical (hashing) model; a neural provider with the same
 dimension can be substituted for production-quality semantics.
+
+---
+
+## 18. Placeholder / mock / dead-code sweep
+
+Classification key:
+1. Safe configuration template (keep).
+2. Test-only mock (keep; must be unmistakable).
+3. Production placeholder (implement or remove from the production path).
+4. Dead code / obsolete Server 3 reference (remove if nothing depends on it).
+5. Optional integration (retain only if its optional behaviour is explicit).
+6. Incomplete feature needing a design decision (document).
+
+Findings:
+
+| # | Location | Current behaviour | Production impact | Class | Action |
+|---|----------|-------------------|-------------------|-------|--------|
+| 1 | `server1/.env.example`, `server2/.env.example` | Documented env templates | None | 1 | Keep |
+| 2 | `MockPersonalBrainLLMProvider` (`app/services/brain_provider.py`) | Offline canned answers; selected when `INTERNAL_API_TOKEN` unset | Silent mock answers if token missing | 2 | Kept; warning/error log added |
+| 3 | `MockGeneralLLMProvider`, `MockPersonalVaultProvider` | No-op boundaries | Could imply success | 2 | Kept; tagged `development_only`; `stored` no longer derived from them |
+| 4 | `server1/app/infrastructure/qdrant/collections.py` | Unused `get_default_collection_names()` "future" list | None (dead) | 4 | Removed |
+| 5 | `server1/app/infrastructure/database/models.py` | Empty "placeholder for future models" module | None (dead) | 4 | Removed |
+| 6 | `server2/app/core/config.py`, `server2/app/config.py` | Legacy `Config`/`settings` shim, incl. `USE_MOCK_MODEL`, `VAULT_ENABLED`, `SERVER1_URL` | Confusing duplicate config; unused | 4 | Removed |
+| 7 | `server2/app/core/logging.py`, `server2/app/providers/` | Unused logger helper; empty package | None (dead) | 4 | Removed |
+| 8 | `server1/app/infrastructure/embeddings.py` | Real deterministic hashing embeddings (dim 256), not neural | Lexical-only retrieval quality | 6 | Documented; neural provider is a design decision |
+| 9 | `server2/app/storage/s3.py` | Real boto3 S3/MinIO backend, lazily imported | Only active when `STORAGE_BACKEND=s3` | 5 | Retained; optional and explicit (`boto3` pinned) |
+| 10 | `server1/app/services/real_brain_provider.py:classify_information` | Deterministic label heuristic ("simple local classification") | Low; not ML classification | 6 | Documented as a design decision |
+| 11 | `server1/app/services/app_registry.py` catalog `status="planned"/"future"` | Descriptive catalog of intended apps | None (catalog only) | 6 | Documented; only 6 apps have real ingestion adapters |
+| 12 | `BrainIngestResponse.stored` | Previously derived from vault provider's optimistic reply | Could report success without a write | 3 | Fixed: now reflects the real write result |
+| 13 | `BrainQueryResponse.source` default | Defaulted to `mock_personal_brain_provider` | Mock name in a production schema | 3 | Fixed: default `unknown` |
+| 14 | Server 3 references | Only in historical docs/specs (`AUDIT_PHASE1.md`, `PLAN_PHASE2.md`, `IMPLEMENTATION_PLAN.md`, `server2/*SPEC*.md`, `aura-platform/*`) | None at runtime | 4 | Retained as historical record; no code path references Server 3 |
+| 15 | `aura-platform/backend.worktrees/...` | Tracked legacy copy (90 files) with `TODO`s and `MockBrainProvider` | None at runtime; repo clutter | 4 | Documented; removal deferred (large legacy tree, no importers) |
+
+Nothing depends on items 4–7 (verified by import/search); they were removed and
+the test suites re-run. `.env.example` files were preserved. No secrets were read
+or modified. Historical Server 3 documents were left intact because they are
+records, not runtime references.

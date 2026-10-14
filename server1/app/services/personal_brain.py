@@ -65,7 +65,10 @@ class PersonalBrainService:
         else:
             self.memory_indexer = get_memory_indexer()
         
-        # Use real provider if INTERNAL_API_TOKEN is configured, otherwise use mock
+        # The real provider is used whenever INTERNAL_API_TOKEN is configured.
+        # Without a token (local development, tests) a clearly-labelled, offline
+        # mock keeps the service running; it must never be mistaken for real
+        # inference, hence the loud log and the explicit non-production source.
         settings = get_settings()
         if llm_provider:
             self.llm_provider = llm_provider
@@ -73,9 +76,18 @@ class PersonalBrainService:
             logger.info("Using RealPersonalBrainLLMProvider (Server 2 integration)")
             self.llm_provider = RealPersonalBrainLLMProvider()
         else:
-            logger.info("Using MockPersonalBrainLLMProvider (no INTERNAL_API_TOKEN)")
+            if settings.environment.lower() == "production":
+                logger.error(
+                    "INTERNAL_API_TOKEN is not configured while ENVIRONMENT=production; "
+                    "falling back to the development mock brain provider"
+                )
+            else:
+                logger.warning("Using MockPersonalBrainLLMProvider (no INTERNAL_API_TOKEN)")
             self.llm_provider = MockPersonalBrainLLMProvider()
-        
+
+        # General-LLM and vault boundaries are optional integrations. They only
+        # default to the mock implementation when no real provider is injected,
+        # and their output is never treated as authoritative (see ingest_data).
         self.general_llm_provider = general_llm_provider or MockGeneralLLMProvider()
         self.vault_provider = vault_provider or MockPersonalVaultProvider()
 
@@ -176,7 +188,7 @@ class PersonalBrainService:
 
         return {
             "answer": personalized,
-            "source": raw.get("source", "mock_personal_brain_provider"),
+            "source": raw.get("source", "unknown"),
             "context_used": bool(enriched_context),
             "user_id": str(user.id),
             "model": raw.get("model"),
@@ -438,7 +450,11 @@ class PersonalBrainService:
         stricter, app-specific shapes use :meth:`ingest_app_event` instead.
         """
         classification = await self.llm_provider.classify_information(user, payload)
-        vault_result = await self.vault_provider.store_ingestion(user, payload)
+        # Informational boundary call only. The authoritative vault write happens
+        # in ``record_ingestion`` via ``MemoryVaultRepository``; the provider's
+        # reply (which may be a development mock) is deliberately not used to
+        # report success.
+        await self.vault_provider.store_ingestion(user, payload)
 
         flat_vault = {**payload, **(payload.get("metadata") or {})}
         normalized = NormalizedIngestion(
@@ -459,8 +475,9 @@ class PersonalBrainService:
         return {
             "accepted": result["accepted"],
             "classification": classification,
-            "stored": vault_result.get("stored", True),
-            "vault_reference": vault_result,
+            # ``stored`` reflects the real write (memory and/or vault pointer),
+            # never the mock provider's optimistic reply.
+            "stored": result["accepted"],
             "memory_id": result.get("memory_id"),
             "vault_entry_id": result.get("vault_entry_id"),
         }

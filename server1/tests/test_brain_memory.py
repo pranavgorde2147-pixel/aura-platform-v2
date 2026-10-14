@@ -236,6 +236,69 @@ def test_ingest_without_object_reference_skips_vault_write():
     asyncio.run(_run())
 
 
+def test_ingest_stored_reflects_real_write_not_provider_reply():
+    async def _run():
+        provider = FakeProvider()
+
+        class OptimisticVault:
+            """Claims success while persisting nothing (worst-case mock)."""
+
+            async def store_ingestion(self, user, payload):
+                return {"stored": True, "source": "mock_personal_vault_provider"}
+
+        service, _ = build_service(provider, make_identity())
+        service.vault_provider = OptimisticVault()
+
+        result = await service.ingest_data(make_user(), {"content": "note"})
+
+        assert result["accepted"] is True
+        assert result["stored"] is True
+        assert result["memory_id"] is not None
+        # The provider's optimistic reply must not leak into the response.
+        assert "vault_reference" not in result
+
+    asyncio.run(_run())
+
+
+def test_ingest_stored_false_when_identity_missing():
+    async def _run():
+        provider = FakeProvider()
+        service, _ = build_service(provider, None)
+
+        result = await service.ingest_data(make_user(), {"content": "note"})
+
+        assert result["accepted"] is False
+        assert result["stored"] is False
+
+    asyncio.run(_run())
+
+
+def test_mock_vault_provider_is_marked_development_only():
+    from app.services.brain_provider import MockPersonalVaultProvider
+
+    async def _run():
+        provider = MockPersonalVaultProvider()
+        user = make_user()
+
+        stored = await provider.store_ingestion(user, {"content": "x"})
+        assert stored["stored"] is False
+        assert stored["source"] == "mock_personal_vault_provider"
+        assert stored["development_only"] is True
+
+        context = await provider.get_context_for_user(user)
+        assert context["development_only"] is True
+
+    asyncio.run(_run())
+
+
+def test_brain_query_response_default_source_is_neutral():
+    from app.schemas.brain import BrainQueryResponse
+
+    response = BrainQueryResponse(answer="hello")
+    assert response.source == "unknown"
+    assert "mock" not in response.source
+
+
 def test_list_memories_empty_without_identity():
     async def _run():
         provider = FakeProvider()
