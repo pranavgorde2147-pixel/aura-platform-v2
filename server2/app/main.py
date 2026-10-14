@@ -9,9 +9,6 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-import urllib.request
-import urllib.error
-
 import torch
 from fastapi import FastAPI, Header, HTTPException, Request
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -134,10 +131,11 @@ def _build_quantization_config(mode: str):
 
 app = FastAPI(title="AURA Server 2", version="0.1.0")
 
-# Object storage endpoints (formerly Server 3). Mounted at /v1/objects so
-# Server 1's existing StorageClient contract keeps working unchanged once its
-# STORAGE_SERVER_URL points at Server 2. Storage health lives under /v1/storage
-# to avoid clashing with the brain's own /health and /ready probes.
+# Object storage endpoints (formerly a separate storage service). Mounted at
+# /v1/objects so Server 1's existing StorageClient contract keeps working
+# unchanged once its STORAGE_SERVER_URL points at Server 2. Storage health lives
+# under /v1/storage to avoid clashing with the brain's own /health and /ready
+# probes.
 app.include_router(objects_router)
 app.include_router(storage_health_router, prefix="/v1/storage")
 
@@ -448,47 +446,6 @@ def _generate_test_response() -> str:
     return "This is a test-mode response generated without loading the local Qwen3.5 checkpoint."
 
 
-# External-hosted LLM proxy helper
-def _call_external_model(prompt: str) -> str:
-    url = _external_api_url()
-    key = _external_api_key()
-    model_name = _external_model_name()
-    if not url or not key:
-        raise RuntimeError("External AI provider not configured (EXTERNAL_AI_URL/EXTERNAL_AI_KEY)")
-
-    payload = {"model": model_name, "input": prompt}
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"})
-    try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            body = resp.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        raise RuntimeError(f"external provider HTTP error: {exc.code} {exc.reason}") from exc
-    except Exception as exc:
-        raise RuntimeError(f"external provider request failed: {exc}") from exc
-
-    try:
-        parsed = json.loads(body)
-    except Exception:
-        # Not JSON — return raw body
-        return body.strip()
-
-    # Try common response shapes
-    if isinstance(parsed, dict):
-        for k in ("response", "output", "text", "result"):
-            if k in parsed and isinstance(parsed[k], str):
-                return parsed[k].strip()
-        if "choices" in parsed and parsed["choices"]:
-            ch = parsed["choices"][0]
-            if isinstance(ch, dict):
-                if "message" in ch and isinstance(ch["message"], dict) and "content" in ch["message"]:
-                    return ch["message"]["content"].strip()
-                if "text" in ch and isinstance(ch["text"], str):
-                    return ch["text"].strip()
-    # Fallback to serialized JSON
-    return json.dumps(parsed)[:10000]
-
-
 @app.post("/v1/brain/infer")
 async def brain_infer(request: Request, authorization: str | None = Header(default=None, alias="Authorization")) -> dict[str, Any]:
     if not authorization or not authorization.startswith("Bearer "):
@@ -543,6 +500,8 @@ async def brain_infer(request: Request, authorization: str | None = Header(defau
             latency_ms = int((time.perf_counter() - start) * 1000)
             return {
                 "model": _external_model_name(),
+                "provider": "external",
+                "source": "server2_external",
                 "response": response_text,
                 "user_id": str(user_id),
                 "request_id": str(request_id) if request_id is not None else str(uuid.uuid4()),
@@ -558,6 +517,8 @@ async def brain_infer(request: Request, authorization: str | None = Header(defau
         latency_ms = int((time.perf_counter() - start) * 1000)
         return {
             "model": _model_name(),
+            "provider": "test",
+            "source": "server2_test_mode",
             "response": response_text,
             "user_id": str(user_id),
             "request_id": str(request_id) if request_id is not None else str(uuid.uuid4()),
@@ -615,6 +576,8 @@ async def brain_infer(request: Request, authorization: str | None = Header(defau
 
     return {
         "model": _model_name(),
+        "provider": getattr(runtime, "provider", "local"),
+        "source": "server2_local",
         "response": response_text,
         "user_id": str(user_id),
         "request_id": str(request_id) if request_id is not None else str(uuid.uuid4()),

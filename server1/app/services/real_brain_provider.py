@@ -104,9 +104,16 @@ class RealPersonalBrainLLMProvider:
                 query=query,
                 context=context,
             )
+            # Server 2 labels the provider that produced the answer. Test-mode
+            # answers must never be presented as real inference.
+            provider = response.get("provider")
+            source = "server2_brain"
+            if provider == "test":
+                source = "server2_test_mode"
             return {
                 "answer": response.get("response", ""),
-                "source": "server2_brain",
+                "source": source,
+                "provider": provider,
                 "context_used": bool(context),
                 "user_id": str(user.id),
                 "model": response.get("model"),

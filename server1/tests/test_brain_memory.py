@@ -74,6 +74,16 @@ def build_service(provider: FakeProvider, identity) -> tuple[PersonalBrainServic
     )
     service.identity_repo = SimpleNamespace(get_by_user_id=AsyncMock(return_value=identity))
     service.brain_memory_repo = memory_repo
+    service.memory_repo = SimpleNamespace(
+        upsert_for_identity=AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4())),
+    )
+    service.knowledge_repo = SimpleNamespace(
+        record_nodes=AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4())),
+    )
+    service.timeline_repo = SimpleNamespace(
+        create=AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4())),
+        commit=AsyncMock(),
+    )
     return service, memory_repo
 
 
@@ -180,6 +190,48 @@ def test_ingest_persists_fact_memory():
         kwargs = repo.create.await_args.kwargs
         assert kwargs["kind"] == MemoryKind.FACT
         assert kwargs["content"] == "Studied DBMS today"
+
+    asyncio.run(_run())
+
+
+def test_ingest_records_vault_knowledge_and_timeline_side_effects():
+    async def _run():
+        provider = FakeProvider()
+        identity = make_identity()
+        service, _ = build_service(provider, identity)
+
+        result = await service.ingest_data(
+            make_user(),
+            {
+                "content": "Met Alice about the roadmap",
+                "object_reference": "objects/note.txt",
+                "mime_type": "text/plain",
+                "file_size_bytes": 42,
+                "source_app": "meeting",
+            },
+        )
+
+        assert result["vault_entry_id"] is not None
+        service.memory_repo.upsert_for_identity.assert_awaited_once()
+        service.knowledge_repo.record_nodes.assert_awaited_once()
+        service.timeline_repo.create.assert_awaited_once()
+        service.timeline_repo.commit.assert_awaited_once()
+        assert service.timeline_repo.create.await_args.kwargs["event_type"] == "memory.ingested"
+
+    asyncio.run(_run())
+
+
+def test_ingest_without_object_reference_skips_vault_write():
+    async def _run():
+        provider = FakeProvider()
+        identity = make_identity()
+        service, _ = build_service(provider, identity)
+
+        result = await service.ingest_data(make_user(), {"content": "plain note"})
+
+        assert result["vault_entry_id"] is None
+        service.memory_repo.upsert_for_identity.assert_not_awaited()
+        service.knowledge_repo.record_nodes.assert_awaited_once()
 
     asyncio.run(_run())
 

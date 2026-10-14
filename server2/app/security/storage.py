@@ -1,7 +1,7 @@
-"""Internal service authentication for Server 3.
+"""Internal service authentication for the Server 2 storage API.
 
-Server 3 never authenticates end users directly. Server 1 authenticates users
-and forwards an authorized operation together with the owning user id. Server 3
+The storage API never authenticates end users directly. Server 1 authenticates
+users and forwards an authorized operation together with the owning user id. It
 only trusts requests that carry the shared internal service token, compared in
 constant time.
 """

@@ -7,9 +7,11 @@ rules used across the rest of the platform.
 
 from __future__ import annotations
 
+from typing import Any
+
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies.auth import get_current_user
@@ -17,12 +19,14 @@ from app.infrastructure.database.session import get_db
 from app.models.user import User
 from app.schemas.apps import (
     AppDefinition,
+    AppIngestResponse,
     ConnectionCreateRequest,
     ConnectionListResponse,
     ConnectionPermissionResponse,
     ConnectionResponse,
     ConnectionUpdateRequest,
 )
+from app.services.app_ingestion import AppIngestionError, get_adapter
 from app.services.app_registry import (
     AppAlreadyInstalledError,
     AppConnectionService,
@@ -30,6 +34,7 @@ from app.services.app_registry import (
     get_catalog_app,
     list_catalog,
 )
+from app.services.personal_brain import PersonalBrainService
 
 router = APIRouter(prefix="/apps", tags=["Apps"])
 
@@ -119,6 +124,56 @@ async def revoke_connection(
     if not revoked:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connection not found")
     return None
+
+
+@router.post(
+    "/{slug}/ingest",
+    response_model=AppIngestResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def ingest_app_event(
+    slug: str,
+    payload: dict[str, Any] = Body(...),
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db),
+) -> AppIngestResponse:
+    """Route one authorized application event into the user's Personal Brain.
+
+    The authenticated user is resolved server-side from the bearer token; the
+    payload never names an owner. The connection's active permission for the
+    app's declared scope/action is enforced before any data is written.
+    """
+    adapter = get_adapter(slug)
+    if adapter is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No ingestion integration exists for this app",
+        )
+
+    connections = AppConnectionService(session)
+    authorized = await connections.has_active_permission(
+        current_user, adapter.slug, adapter.scope, adapter.action
+    )
+    if not authorized:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="App is not authorized to send data to this user's brain",
+        )
+
+    brain = PersonalBrainService(session)
+    try:
+        result = await brain.ingest_app_event(current_user, adapter, payload)
+    except AppIngestionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+
+    if not result.get("accepted"):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Personal brain not found for user",
+        )
+    return AppIngestResponse(source_app=adapter.slug, **result)
 
 
 @router.get("/{slug}", response_model=AppDefinition, include_in_schema=True)

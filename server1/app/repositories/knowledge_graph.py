@@ -46,3 +46,30 @@ class KnowledgeGraphRepository(BaseRepository[KnowledgeGraph]):
             .limit(limit)
         )
         return result.scalars().all()
+
+    async def record_nodes(
+        self,
+        ai_identity_id: uuid.UUID,
+        *,
+        nodes: int = 1,
+        graph_type: str = "personal",
+        name: str = "Personal Knowledge",
+        graph_metadata: str | None = None,
+    ) -> KnowledgeGraph:
+        """Create the identity's graph if absent, then increment its node count."""
+        existing = await self.get_by_ai_identity_id(ai_identity_id)
+        if existing is None:
+            return await self.create(
+                ai_identity_id=ai_identity_id,
+                graph_type=graph_type,
+                name=name,
+                node_count=max(0, nodes),
+                edge_count=0,
+                status="active",
+                graph_metadata=graph_metadata,
+            )
+        existing.node_count += max(0, nodes)
+        if graph_metadata is not None:
+            existing.graph_metadata = graph_metadata
+        await self.session.flush()
+        return existing

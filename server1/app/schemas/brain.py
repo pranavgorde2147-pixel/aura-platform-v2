@@ -68,6 +68,7 @@ class BrainIngestResponse(BaseModel):
     classification: dict[str, Any]
     stored: bool = True
     memory_id: uuid.UUID | None = None
+    vault_entry_id: uuid.UUID | None = None
 
 
 class MemoryCreateRequest(BaseModel):

@@ -9,8 +9,8 @@ App ──HTTPS+JWT──► Server 1 ──Bearer INTERNAL_API_TOKEN──► S
                              └──Bearer STORAGE_API_TOKEN──► Server 2 /v1/objects
 ```
 
-Server 3 is retired: the object-storage engine now runs inside Server 2, and
-Server 1 points `STORAGE_SERVER_URL` at Server 2.
+The object-storage engine runs inside Server 2, and Server 1 points
+`STORAGE_SERVER_URL` at Server 2.
 
 ## Topology options
 
@@ -152,7 +152,8 @@ their URLs/tokens into the dashboard secrets listed below.
 
 - Postgres: Neon → `POSTGRES_URL`
 - Redis: Upstash → `REDIS_URL` (`rediss://...`)
-- Qdrant: Qdrant Cloud → `QDRANT_URL`
+- Qdrant: Qdrant Cloud → `QDRANT_URL` (must include the scheme, e.g.
+  `https://<cluster-id>.<region>.aws.cloud.qdrant.io:6333`) and `QDRANT_API_KEY`
 - Object storage: a Render disk at `/var/data` (bundled in `render.yaml`) or
   Cloudflare R2 → set Server 2 `STORAGE_BACKEND=s3` plus `S3_ENDPOINT_URL`,
   `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`.
@@ -175,6 +176,8 @@ Server 2 in the cloud runs in external-provider mode
    Wait for `GET /health` → `provider: external`.
 4. Deploy `aura-server1a-core`. Set dashboard secrets:
    - `POSTGRES_URL`, `REDIS_URL`, `QDRANT_URL` from step 2
+   - `QDRANT_API_KEY` = the Qdrant Cloud API key (required; Qdrant Cloud
+     rejects unauthenticated requests with HTTP 403)
    - `JWT_SECRET_KEY` = a new strong random string
    - `INTERNAL_API_TOKEN`, `STORAGE_API_TOKEN` = the values from step 3
    - `AI_SERVER_URL` = the internal URL of `aura-server2` (Render dashboard →

@@ -1,4 +1,4 @@
-"""Object storage tests for Server 2 (storage migrated from Server 3).
+"""Object storage tests for Server 2 (formerly the standalone storage service).
 
 Covers upload/download/list/delete lifecycles, per-owner isolation, size and
 content-type limits, and persistence across an engine restart. These prove the

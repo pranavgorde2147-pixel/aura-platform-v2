@@ -23,15 +23,61 @@ def make_user(email: str = "user@example.com") -> User:
     return user
 
 
+class FakeSessionRepo:
+    """In-memory stand-in for SessionRepository used by the auth unit tests."""
+
+    def __init__(self) -> None:
+        self.sessions: dict[uuid.UUID, SimpleNamespace] = {}
+
+    async def create(self, **kwargs):
+        record = SimpleNamespace(
+            user_id=kwargs["user_id"],
+            refresh_token_hash=kwargs["refresh_token_hash"],
+            expires_at=kwargs["expires_at"],
+            is_revoked=kwargs.get("is_revoked", False),
+            revoked_at=None,
+            user_agent=kwargs.get("user_agent"),
+            ip_address=kwargs.get("ip_address"),
+            last_used_at=kwargs.get("last_used_at"),
+        )
+        self.sessions[kwargs["id"]] = record
+        return record
+
+    async def get_by_id(self, session_id):
+        return self.sessions.get(session_id)
+
+    async def revoke(self, session_id):
+        record = self.sessions.get(session_id)
+        if record is None:
+            return False
+        record.is_revoked = True
+        return True
+
+    async def revoke_all_for_user(self, user_id, except_session_id=None):
+        count = 0
+        for session_id, record in self.sessions.items():
+            if record.user_id != user_id or session_id == except_session_id:
+                continue
+            if not record.is_revoked:
+                record.is_revoked = True
+                count += 1
+        return count
+
+
+def _auth_service(user: User) -> AuthService:
+    service = AuthService(SimpleNamespace(commit=AsyncMock()))
+    service.user_repo = SimpleNamespace(
+        get_by_email=AsyncMock(return_value=user),
+        get_by_id=AsyncMock(return_value=user),
+    )
+    service.session_repo = FakeSessionRepo()
+    return service
+
+
 def test_login_and_refresh_flow_builds_valid_tokens():
     async def _run():
         user = make_user("alice@example.com")
-        session = SimpleNamespace(commit=AsyncMock())
-        service = AuthService(session)
-        service.user_repo = SimpleNamespace(
-            get_by_email=AsyncMock(return_value=user),
-            get_by_id=AsyncMock(return_value=user),
-        )
+        service = _auth_service(user)
 
         login_result = await service.login(user.email, "password123")
 
@@ -43,7 +89,52 @@ def test_login_and_refresh_flow_builds_valid_tokens():
         refreshed = await service.refresh_token(login_result["refresh_token"])
         assert refreshed["token_type"] == "bearer"
         assert refreshed["access_token"]
+        assert refreshed["refresh_token"] != login_result["refresh_token"]
         assert decode_token(refreshed["access_token"], token_type="access")["sub"] == str(user.id)
+
+    asyncio.run(_run())
+
+
+def test_refresh_rotates_session_and_detects_reuse():
+    async def _run():
+        user = make_user("rotate@example.com")
+        service = _auth_service(user)
+
+        login_result = await service.login(user.email, "password123")
+        refreshed = await service.refresh_token(login_result["refresh_token"])
+        assert refreshed["refresh_token"] != login_result["refresh_token"]
+
+        # Replaying the now-rotated token is reuse: all sessions are revoked.
+        try:
+            await service.refresh_token(login_result["refresh_token"])
+            raise AssertionError("expected reuse to be rejected")
+        except ValueError:
+            pass
+
+        assert all(record.is_revoked for record in service.session_repo.sessions.values())
+        try:
+            await service.refresh_token(refreshed["refresh_token"])
+            raise AssertionError("expected all sessions to be revoked")
+        except ValueError:
+            pass
+
+    asyncio.run(_run())
+
+
+def test_logout_revokes_session():
+    async def _run():
+        user = make_user("logout@example.com")
+        service = _auth_service(user)
+
+        login_result = await service.login(user.email, "password123")
+        await service.logout(login_result["refresh_token"])
+
+        assert all(record.is_revoked for record in service.session_repo.sessions.values())
+        try:
+            await service.refresh_token(login_result["refresh_token"])
+            raise AssertionError("expected logout to invalidate the refresh token")
+        except ValueError:
+            pass
 
     asyncio.run(_run())
 
@@ -58,6 +149,16 @@ def test_personal_brain_uses_provider_and_keeps_user_isolation():
             get_by_user_id=AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4()))
         )
         service.brain_memory_repo = SimpleNamespace(
+            create=AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4())),
+            commit=AsyncMock(),
+        )
+        service.memory_repo = SimpleNamespace(
+            upsert_for_identity=AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4())),
+        )
+        service.knowledge_repo = SimpleNamespace(
+            record_nodes=AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4())),
+        )
+        service.timeline_repo = SimpleNamespace(
             create=AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4())),
             commit=AsyncMock(),
         )

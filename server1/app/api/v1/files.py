@@ -1,9 +1,9 @@
 """File API routes.
 
-Clients never talk to Server 3 directly. They authenticate against Server 1,
-which authorizes the operation and forwards it to the storage engine using the
-authenticated user's id as the owner. This module is the only Server 1 code
-that constructs storage requests.
+Clients never talk to the storage API directly. They authenticate against
+Server 1, which authorizes the operation and forwards it to the storage engine
+using the authenticated user's id as the owner. This module is the only Server 1
+code that constructs storage requests.
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ async def upload_file(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Upload a file owned by the authenticated user via Server 3."""
+    """Upload a file owned by the authenticated user via the storage API."""
     settings = get_settings()
     content = await _read_limited(file, settings.max_upload_size_bytes)
     if not content:

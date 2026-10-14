@@ -87,3 +87,16 @@ class ConnectionListResponse(BaseModel):
     """All of a user's app connections."""
 
     items: list[ConnectionResponse] = Field(default_factory=list)
+
+
+class AppIngestResponse(BaseModel):
+    """Result of routing one application event into the user's brain."""
+
+    accepted: bool = True
+    source_app: str
+    event_type: str
+    duplicate: bool = False
+    partial: bool = False
+    memory_id: str | None = None
+    vault_entry_id: str | None = None
+    reason: str | None = None

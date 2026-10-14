@@ -49,6 +49,35 @@ def test_uses_external_fallback_when_server2_unreachable(monkeypatch):
     asyncio.run(_run())
 
 
+def test_server2_test_mode_response_is_labelled(monkeypatch):
+    async def _run():
+        monkeypatch.setattr(
+            real_brain_provider,
+            "get_brain_client",
+            lambda: SimpleNamespace(
+                infer=AsyncMock(
+                    return_value={
+                        "response": "canned",
+                        "model": "Qwen3.5-0.8B",
+                        "provider": "test",
+                    }
+                )
+            ),
+        )
+        from app.core.config import get_settings
+
+        get_settings.cache_clear()
+
+        provider = RealPersonalBrainLLMProvider()
+        result = await provider.process_query(make_user(), "hello", {})
+
+        assert result["source"] == "server2_test_mode"
+        assert result["provider"] == "test"
+        assert result["answer"] == "canned"
+
+    asyncio.run(_run())
+
+
 def test_no_fallback_when_disabled(monkeypatch):
     async def _run():
         monkeypatch.setattr(

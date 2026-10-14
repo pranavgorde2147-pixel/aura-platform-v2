@@ -1,4 +1,4 @@
-"""Pydantic schemas for the Server 3 API."""
+"""Pydantic schemas for the Server 2 storage API."""
 
 from __future__ import annotations
 

@@ -1,6 +1,6 @@
 # AURA Server 2
 
-AURA Server 2 is the actual Personal Brain runtime for the local Qwen3.5-4B checkpoint. This service is intentionally limited to internal inference and health endpoints; it does not implement a database, user authentication flow, memory store, vault access, or Server 3 integration.
+AURA Server 2 is the Personal Brain runtime (local Qwen3.5-0.8B GGUF or an external provider) and hosts the object-storage API that Server 1's file API proxies to. It does not implement user authentication, a user-facing memory store, or vault access.
 
 ## Purpose
 
@@ -133,7 +133,7 @@ CUDA device; on CPU the flag is ignored and the model loads in full precision.
 ## Security and isolation
 
 - This is an internal inference service, not an external application-facing API.
-- There is no user database, vault access, or Server 3 dependency.
+- There is no user database or vault access.
 - There is no memory store or personal-data retrieval beyond the approved request context.
 - Server 2 does not perform user authentication or user account management.
 
@@ -162,5 +162,5 @@ The integration test loads the actual local checkpoint and verifies a real gener
 - Qwen3.5-4B is the only model used.
 - No additional model is downloaded.
 - No replacement model is created.
-- No database or vault access is added.
-- No Server 1 or Server 3 dependencies are introduced.
+- No user database or vault access is added.
+- No Server 1 dependency is introduced.

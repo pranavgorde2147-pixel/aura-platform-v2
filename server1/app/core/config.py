@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     )
     redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
     qdrant_url: str = Field(default="http://localhost:6333", alias="QDRANT_URL")
+    # API key for Qdrant Cloud / secured Qdrant (sent as the ``api-key`` header).
+    # Leave empty for an unauthenticated local Qdrant.
+    qdrant_api_key: str = Field(default="", alias="QDRANT_API_KEY")
     jwt_secret_key: str = Field(default="change-me-in-production", alias="JWT_SECRET_KEY")
     jwt_algorithm: str = Field(default="HS256", alias="JWT_ALGORITHM")
     access_token_expire_minutes: int = Field(default=15, alias="ACCESS_TOKEN_EXPIRE_MINUTES")
@@ -50,7 +53,7 @@ class Settings(BaseSettings):
     # authenticated service traffic. Both must be set to take effect.
     ai_access_client_id: str = Field(default="", alias="AI_ACCESS_CLIENT_ID")
     ai_access_client_secret: str = Field(default="", alias="AI_ACCESS_CLIENT_SECRET")
-    # Object storage API (formerly Server 3, now hosted by Server 2). Falls back
+    # Object storage API (hosted by Server 2). Falls back
     # to INTERNAL_API_TOKEN when unset.
     storage_server_url: str = Field(default="http://localhost:8001", alias="STORAGE_SERVER_URL")
     storage_api_token: str = Field(default="", alias="STORAGE_API_TOKEN")
@@ -72,6 +75,17 @@ class Settings(BaseSettings):
     # Optional embedded Qdrant mode for local development/tests. When set, the
     # backend uses an on-disk Qdrant instance instead of a remote QDRANT_URL.
     qdrant_local_path: str = Field(default="", alias="QDRANT_LOCAL_PATH")
+    # Semantic memory: collection name, embedding dimension and the master
+    # switch. Embeddings default to a dependency-free deterministic provider so
+    # the vector pipeline works offline; index/search failures fall back to
+    # keyword retrieval and never break a request.
+    qdrant_memory_collection: str = Field(
+        default="brain_memories", alias="QDRANT_MEMORY_COLLECTION"
+    )
+    embedding_dimension: int = Field(default=256, alias="EMBEDDING_DIMENSION")
+    memory_vector_search_enabled: bool = Field(
+        default=True, alias="MEMORY_VECTOR_SEARCH_ENABLED"
+    )
     # Optional embedded Redis (fakeredis) for local development/tests.
     use_fake_redis: bool = Field(default=False, alias="USE_FAKE_REDIS")
 

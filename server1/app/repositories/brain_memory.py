@@ -62,3 +62,21 @@ class BrainMemoryRepository(BaseRepository[BrainMemory]):
             .offset(offset)
         )
         return list(result.scalars().all())
+
+    async def get_by_ids(
+        self, ai_identity_id: uuid.UUID, memory_ids: list[uuid.UUID]
+    ) -> list[BrainMemory]:
+        """Return memories by ID, restricted to a single AI identity.
+
+        The identity restriction is a safety net: even if a memory ID leaks from
+        another identity's vector index, it can never be read across identities.
+        """
+        if not memory_ids:
+            return []
+        result = await self.session.execute(
+            select(BrainMemory).where(
+                BrainMemory.ai_identity_id == ai_identity_id,
+                BrainMemory.id.in_(memory_ids),
+            )
+        )
+        return list(result.scalars().all())

@@ -24,19 +24,14 @@ htmlcov/
 # Logs
 *.log
 
-# Local infrastructure artifacts (Qdrant data, markers)
-storage/
-snapshots/
-.qdrant-initialized
+# Local infrastructure artifacts (Qdrant data, markers) - repo root only, so
+# application source packages named "storage" are never ignored.
+/storage/
+/snapshots/
+/.qdrant-initialized
 
 # Server 2 model mount (read-only host directory, never bundled)
 server2/models/
 
 # Server 2 object-storage data (SQLite metadata + objects)
 server2/data/
-
-# Legacy Server 3 object-storage data (SQLite metadata + objects)
-server3/data/
-
-# Stale git worktree copies
-**/backend.worktrees/server3/data/

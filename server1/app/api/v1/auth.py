@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies.auth import get_current_user
@@ -14,15 +14,28 @@ from app.services.auth import AuthService
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 
+def _client_metadata(request: Request) -> tuple[str | None, str | None]:
+    """Return a bounded user-agent and the client IP for session audit fields."""
+    user_agent = request.headers.get("user-agent")
+    if user_agent is not None:
+        user_agent = user_agent[:500]
+    client_ip = request.client.host if request.client else None
+    return user_agent, client_ip
+
+
 @router.post("/login", response_model=TokenResponse)
 async def login(
-    request: LoginRequest,
+    request: Request,
+    payload: LoginRequest,
     session: AsyncSession = Depends(get_db),
 ) -> TokenResponse:
     """Authenticate a user and return JWT access and refresh tokens."""
+    user_agent, client_ip = _client_metadata(request)
     service = AuthService(session)
     try:
-        token_payload = await service.login(request.email, request.password)
+        token_payload = await service.login(
+            payload.email, payload.password, user_agent=user_agent, ip_address=client_ip
+        )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
     return TokenResponse(**token_payload)
@@ -30,13 +43,17 @@ async def login(
 
 @router.post("/refresh", response_model=TokenResponse)
 async def refresh(
-    request: RefreshRequest,
+    request: Request,
+    payload: RefreshRequest,
     session: AsyncSession = Depends(get_db),
 ) -> TokenResponse:
     """Refresh an access token using a valid refresh token."""
+    user_agent, client_ip = _client_metadata(request)
     service = AuthService(session)
     try:
-        token_payload = await service.refresh_token(request.refresh_token)
+        token_payload = await service.refresh_token(
+            payload.refresh_token, user_agent=user_agent, ip_address=client_ip
+        )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
     return TokenResponse(**token_payload)
@@ -44,17 +61,14 @@ async def refresh(
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 async def logout(
-    request: RefreshRequest,
+    payload: RefreshRequest,
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db),
 ) -> None:
-    """Invalidate a refresh token and log a user out."""
+    """Invalidate the session tied to a refresh token (idempotent)."""
     del current_user
     service = AuthService(session)
-    try:
-        await service.logout(request.refresh_token)
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+    await service.logout(payload.refresh_token)
     return None
 
 

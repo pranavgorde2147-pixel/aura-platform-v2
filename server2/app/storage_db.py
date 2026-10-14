@@ -1,4 +1,4 @@
-"""Database setup and a portable GUID type for Server 3.
+"""Database setup and a portable GUID type for Server 2 object storage.
 
 The metadata store defaults to SQLite (via aiosqlite) so the storage engine is
 self-contained. Set ``STORAGE_DATABASE_URL`` to a PostgreSQL URL in production.

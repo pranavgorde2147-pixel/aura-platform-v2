@@ -63,7 +63,7 @@ class GeneralLLMProvider(Protocol):
 
 
 class PersonalVaultProvider(Protocol):
-    """Future abstraction for the personal vault/server (Server 3) storage boundary."""
+    """Future abstraction for the personal vault storage boundary."""
 
     async def get_context_for_user(self, user: User) -> dict[str, Any]:
         """Return user-specific context that the Brain is entitled to access."""
@@ -166,7 +166,7 @@ class MockGeneralLLMProvider:
 
 
 class MockPersonalVaultProvider:
-    """Minimal development vault abstraction for a future Server 3 personal-data boundary."""
+    """Minimal development vault abstraction for a future personal-data boundary."""
 
     async def get_context_for_user(self, user: User) -> dict[str, Any]:
         return {

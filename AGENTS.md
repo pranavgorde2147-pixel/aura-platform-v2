@@ -2,13 +2,17 @@
 
 ## Repository Structure
 
-Two deployable services in this workspace (plus a legacy, non-deployed copy):
+Two deployable services in this workspace:
 
 | Directory | Purpose | Port | Entry |
 |-----------|---------|------|-------|
 | `server1/` | AURA Core: FastAPI API server + Personal Brain (Postgres, Redis, Qdrant) | 8000 | `app/main.py:create_app()` |
-| `server2/` | AURA Brain: inference service (local Qwen3.5-0.8B GGUF or external provider) **and** object storage API (formerly Server 3) | 8001 | `app/main.py` |
-| `server3/` | Legacy standalone storage engine — no longer deployed; storage now lives in `server2/` | 8002 | `app/main.py:create_app()` |
+| `server2/` | AURA Brain: inference service (local Qwen3.5-0.8B GGUF or external provider) **and** object storage API | 8001 | `app/main.py` |
+
+The object storage engine (formerly a separate "Server 3") now lives inside
+`server2/`. `server2/app/storage_app.py` is an alternate storage-only ASGI
+entrypoint (no model/torch load) used for running and integration-testing the
+storage subsystem; production serves storage alongside the brain via `app.main`.
 
 ## Quick Start - Backend (Server 1)
 
@@ -32,34 +36,24 @@ Health: `GET /health` (returns healthy only after model loads or when
 `AURA_SKIP_MODEL_LOAD=1`). Storage health: `GET /v1/storage/health`; readiness:
 `GET /v1/storage/ready`.
 
-## Legacy Server 3
-
-`server3/` still contains a working, token-protected storage service and its
-tests, kept for reference. It is **not** part of the deployment; the same code
-now runs inside `server2/` and Server 1 points `STORAGE_SERVER_URL` at Server 2.
-
 All services join the external `aura-network` Docker network so the backend
 resolves `aura-server2` by name.
 
 ## Running Tests
 
-Backend and Server 3 tests share the backend venv. Set
-`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` to bypass a broken system pytest plugin.
+Server 1 and Server 2 tests share the Server 1 venv (the storage subsystem in
+Server 2 has no torch dependency). Set `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` to
+bypass a broken system pytest plugin.
 
 **Backend:**
 ```bash
 cd server1
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q tests
 ```
-Includes integration tests that boot a real storage process and a real embedded
-PostgreSQL (`pgserver`). The real Qwen integration test only runs when the model
-checkpoint exists and `AURA_RUN_INTEGRATION=1`.
-
-**Legacy Server 3:**
-```bash
-cd server3
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ../server1/.venv/bin/python -m pytest -q tests
-```
+Includes integration tests that boot Server 2's real storage app
+(`app.storage_app`) and a real embedded PostgreSQL (`pgserver`). The real Qwen
+integration test only runs when the model checkpoint exists and
+`AURA_RUN_INTEGRATION=1`.
 
 **Server 2 (skip model load):**
 ```bash
@@ -105,7 +99,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q tests
 ## Environment Variables
 
 **Backend** (`server1/.env`):
-- `POSTGRES_URL`, `REDIS_URL`, `QDRANT_URL` - infrastructure connections
+- `POSTGRES_URL`, `REDIS_URL`, `QDRANT_URL`, `QDRANT_API_KEY` - infrastructure connections
 - `JWT_SECRET_KEY` - change from default in production
 - `AI_SERVER_URL` - defaults to `http://localhost:8001` (Server 2)
 - `STORAGE_SERVER_URL` - defaults to `http://localhost:8001` (storage API on Server 2)

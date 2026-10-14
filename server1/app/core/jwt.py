@@ -20,13 +20,23 @@ def create_access_token(user_id: str, expires_delta: timedelta | None = None) ->
     return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
 
 
-def create_refresh_token(user_id: str, expires_delta: timedelta | None = None) -> str:
-    """Create a long-lived JWT refresh token."""
+def create_refresh_token(
+    user_id: str,
+    expires_delta: timedelta | None = None,
+    jti: str | None = None,
+) -> str:
+    """Create a long-lived JWT refresh token.
+
+    ``jti`` binds the token to a persisted session row so the server can revoke
+    and rotate individual sessions rather than trusting the token blindly.
+    """
     settings = get_settings()
     if expires_delta is None:
         expires_delta = timedelta(days=settings.refresh_token_expire_days)
     expire = datetime.now(timezone.utc) + expires_delta
-    payload = {"sub": str(user_id), "type": "refresh", "exp": expire}
+    payload: dict[str, Any] = {"sub": str(user_id), "type": "refresh", "exp": expire}
+    if jti is not None:
+        payload["jti"] = str(jti)
     return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
 
 

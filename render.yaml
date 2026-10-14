@@ -23,6 +23,8 @@ services:
         sync: false
       - key: QDRANT_URL
         sync: false
+      - key: QDRANT_API_KEY
+        sync: false
       - key: JWT_SECRET_KEY
         sync: false
       - key: INTERNAL_API_TOKEN
@@ -30,6 +32,8 @@ services:
       # Secure tunnel origin for the laptop's Server 2 (NOT localhost/127.0.0.1).
       - key: AI_SERVER_URL
         sync: false
+      # Storage API origin (Server 2). Must include the scheme, e.g.
+      # https://aura-server2.onrender.com or https://aura-server2:8001
       - key: STORAGE_SERVER_URL
         sync: false
       - key: STORAGE_API_TOKEN
@@ -43,7 +47,7 @@ services:
         sync: false
 
   # ============ Server 2 - AURA Brain (inference + memory + object storage) ============
-  # This service hosts the /v1/brain/infer API and, since Server 3 was retired,
+  # This service hosts the /v1/brain/infer API and
   # also the /v1/objects storage API (Server 1 points STORAGE_SERVER_URL here).
   # It runs with AURA_SKIP_MODEL_LOAD=1 using the external Groq provider on Render;
   # the local GGUF (Qwen3.5-0.8B) runs on the GPU laptop and must be reached

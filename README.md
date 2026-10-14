@@ -21,7 +21,7 @@ services, and changing the brain model.
                    ┌───────────────────────────────────────────────────────┐
                    │ Server 2 (8001)  AURA Brain                            │
                    │  /v1/brain/infer  inference                            │
-                   │  /v1/objects      object storage (formerly Server 3)   │
+                   │  /v1/objects      object storage                       │
                    └───────────────────────────────────────────────────────┘
                             │
                    Postgres · Redis · Qdrant (Server 1 infra)
@@ -34,7 +34,6 @@ bearer token; your app never talks to it directly.
 |---------|-----------|------|---------|------|
 | Server 1 | `server1/` | 8000 | Yes | Auth, users, Personal Brain, file API, app registry, health |
 | Server 2 | `server2/` | 8001 | No | LLM inference (`/v1/brain/infer`) + object storage (`/v1/objects`) |
-| Server 3 | `server3/` | 8002 | No | Legacy standalone storage — reference only, not deployed |
 
 ---
 
@@ -166,10 +165,26 @@ Authentication: send `Authorization: Bearer <access_token>` on `(auth)` routes.
 | Method | Path | Body | Notes |
 |--------|------|------|-------|
 | POST | `/brain/query` | `{query, context?, use_memory?, persist_interaction?, memory_limit?}` | Calls Server 2 |
-| POST | `/brain/ingest` | `{content, content_type?, source_app?, metadata?}` | Persists a `fact` |
+| POST | `/brain/ingest` | `{content, content_type?, source_app?, metadata?}` | Persists a `fact`; `source_app` requires an authorized app connection |
 | POST | `/brain/memory` | `{content, kind?, summary?, source_app?, importance?}` | 201; explicit memory |
 | GET | `/brain/memory?limit&offset` | – | list memories |
 | GET | `/brain/context` | – | current user's brain context |
+
+### App ingestion (concrete per-app integrations)
+
+| Method | Path | Body | Notes |
+|--------|------|------|-------|
+| GET | `/apps` | – | public catalog |
+| GET | `/apps/{slug}` | – | public catalog entry |
+| GET | `/apps/me` | – | the user's app connections |
+| POST | `/apps/me` | `{module_slug, permissions?}` | authorize an app (201) |
+| PATCH/PUT | `/apps/me/{module_id}` | `{is_active?, permissions?}` | update a connection |
+| DELETE | `/apps/me/{module_id}` | – | revoke a connection (204) |
+| POST | `/apps/{slug}/ingest` | app-specific JSON | auth + active app permission required; routes one event into the user's brain (201) |
+
+Supported ingestion slugs: `brain` (AURA Chat), `study`, `diary`, `meeting`,
+`travel`, `notifications`. See `docs/AURA_APP_INTEGRATIONS.md`. Supplying an
+`external_id` makes a write idempotent. No app frontends exist in this repo.
 
 `/brain/query` response (`BrainQueryResponse`):
 ```json
@@ -320,11 +335,6 @@ default, or Postgres via `STORAGE_DATABASE_URL`).
 | `STORAGE_API_TOKEN` | – | **must match Server 1's `STORAGE_API_TOKEN`** |
 | `MAX_UPLOAD_SIZE_BYTES` / `ALLOWED_CONTENT_TYPES` | `52428800` / empty | upload limit and allow-list |
 | `S3_ENDPOINT_URL` / `S3_BUCKET` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` / `S3_REGION` / `S3_USE_SSL` | – | S3/MinIO/R2 settings |
-
-### Legacy Server 3 (`server3/.env`)
-
-Not deployed. Kept for reference; the same storage code and variables now run
-inside Server 2.
 
 ---
 
@@ -509,10 +519,6 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q tests
 # Server 2 (skip model load)
 cd server2
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q tests
-
-# Legacy Server 3 (reuses Server 1's venv)
-cd server3
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ../server1/.venv/bin/python -m pytest -q tests
 ```
 `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` avoids a broken system plugin (ROS). The real
 Qwen inference test only runs with `AURA_RUN_INTEGRATION=1` and the checkpoint
@@ -547,8 +553,7 @@ present.
 ├── docs/
 │   └── AURA_APP_INVENTORY.md   # app catalog and connection permissions
 ├── server1/             # Server 1: FastAPI backend + brain + file API + app registry
-├── server2/             # Server 2: inference (GGUF/transformers/external) + storage
-└── server3/             # Legacy standalone storage engine (reference only)
+└── server2/             # Server 2: inference (GGUF/transformers/external) + storage
 ```
 
 > Not-yet-verified in a Docker/GPU environment: `docker compose` orchestration

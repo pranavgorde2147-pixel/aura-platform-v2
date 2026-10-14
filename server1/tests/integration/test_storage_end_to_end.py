@@ -1,8 +1,10 @@
-"""End-to-end integration test between Server 1's StorageClient and a real,
-running Server 3 process.
+"""End-to-end integration test between Server 1's StorageClient and Server 2's
+real object-storage API.
 
-Server 3 is launched as a uvicorn subprocess on a free port with an isolated
-SQLite metadata database and local filesystem backend. This exercises the full
+The storage engine runs inside Server 2; ``app.storage_app`` serves the same
+``/v1/objects`` and ``/v1/storage/*`` endpoints without loading the brain model.
+It is launched as a uvicorn subprocess on a free port with an isolated SQLite
+metadata database and local filesystem backend. This exercises the full
 authenticated path: internal token validation, owner scoping, upload, list,
 metadata, download and delete, plus cross-user isolation.
 """
@@ -23,7 +25,7 @@ import pytest
 from app.infrastructure.storage_client import StorageClient, StorageServiceError
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-SERVER3_DIR = REPO_ROOT / "server3"
+SERVER2_DIR = REPO_ROOT / "server2"
 TOKEN = "integration-storage-token"
 
 
@@ -35,15 +37,16 @@ def _free_port() -> int:
 
 @pytest.fixture(scope="module")
 def storage_server(tmp_path_factory):
-    if not (SERVER3_DIR / "app" / "main.py").exists():
-        pytest.skip("Server 3 source not available")
+    if not (SERVER2_DIR / "app" / "storage_app.py").exists():
+        pytest.skip("Server 2 storage app source not available")
     if not hasattr(socket, "AF_INET"):
         pytest.skip("networking unavailable")
 
     port = _free_port()
-    data_dir = tmp_path_factory.mktemp("server3-data")
+    data_dir = tmp_path_factory.mktemp("server2-storage-data")
     env = {
         **os.environ,
+        "AURA_SKIP_DOTENV": "1",
         "STORAGE_API_TOKEN": TOKEN,
         "STORAGE_BACKEND": "local",
         "STORAGE_DATA_DIR": str(data_dir),
@@ -52,8 +55,8 @@ def storage_server(tmp_path_factory):
         "PORT": str(port),
     }
     process = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(port)],
-        cwd=str(SERVER3_DIR),
+        [sys.executable, "-m", "uvicorn", "app.storage_app:app", "--host", "127.0.0.1", "--port", str(port)],
+        cwd=str(SERVER2_DIR),
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -64,7 +67,7 @@ def storage_server(tmp_path_factory):
     ready = False
     while time.time() < deadline and process.poll() is None:
         try:
-            if httpx.get(f"{base_url}/health", timeout=2.0).status_code == 200:
+            if httpx.get(f"{base_url}/v1/storage/health", timeout=2.0).status_code == 200:
                 ready = True
                 break
         except httpx.HTTPError:
@@ -73,7 +76,7 @@ def storage_server(tmp_path_factory):
     if not ready:
         process.terminate()
         output = process.stdout.read().decode(errors="replace") if process.stdout else ""
-        pytest.fail(f"Server 3 failed to start:\n{output}")
+        pytest.fail(f"Server 2 storage app failed to start:\n{output}")
 
     yield base_url
     process.terminate()
@@ -88,6 +91,18 @@ def _client(base_url: str) -> StorageClient:
     client.base_url = base_url
     client.token = TOKEN
     return client
+
+
+@pytest.mark.integration
+def test_health_check_reports_ready(storage_server):
+    import asyncio
+
+    async def _run():
+        result = await _client(storage_server).health_check()
+        assert result is not None
+        assert result.get("status") == "ready"
+
+    asyncio.run(_run())
 
 
 @pytest.mark.integration

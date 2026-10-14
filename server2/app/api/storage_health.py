@@ -1,4 +1,4 @@
-"""Liveness and readiness endpoints for Server 3."""
+"""Liveness and readiness endpoints for the Server 2 storage API."""
 
 from __future__ import annotations
 

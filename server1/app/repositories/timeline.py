@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import and_
@@ -48,11 +48,35 @@ class TimelineRepository(BaseRepository[Timeline]):
         )
         return result.scalars().all()
 
+    async def find_by_reference(
+        self,
+        ai_identity_id: uuid.UUID,
+        event_type: str,
+        resource_reference: str,
+    ) -> Timeline | None:
+        """Return a prior event for idempotency checks, or None.
+
+        Matches on identity + event type + reference so replays of the same app
+        event (same external id) are not processed twice.
+        """
+        result = await self.session.execute(
+            select(Timeline)
+            .where(
+                and_(
+                    Timeline.ai_identity_id == ai_identity_id,
+                    Timeline.event_type == event_type,
+                    Timeline.resource_reference == resource_reference,
+                )
+            )
+            .order_by(Timeline.occurred_at.desc())
+        )
+        return result.scalars().first()
+
     async def get_recent_entries(
         self, ai_identity_id: uuid.UUID, hours: int = 24, limit: int = 100
     ) -> list[Timeline]:
         """Retrieve recent timeline entries within the specified hours."""
-        cutoff_time = datetime.utcnow() - timedelta(hours=hours)
+        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
         result = await self.session.execute(
             select(Timeline)
             .where(

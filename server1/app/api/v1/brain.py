@@ -61,6 +61,16 @@ async def ingest_to_brain(
     session: AsyncSession = Depends(get_db),
 ) -> BrainIngestResponse:
     """Send application-generated data to the user's Personal Brain for classification."""
+    if payload.source_app:
+        authorized = await AppConnectionService(session).has_active_permission(
+            current_user, payload.source_app, scope="memory", action="write"
+        )
+        if not authorized:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="App is not authorized to ingest into this user's brain",
+            )
+
     service = PersonalBrainService(session)
     result = await service.ingest_data(current_user, payload.model_dump())
     return BrainIngestResponse(**result)

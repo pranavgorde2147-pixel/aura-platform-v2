@@ -1,4 +1,4 @@
-"""Tests for the Server 1 file API and its Server 3 delegation boundary.
+"""Tests for the Server 1 file API and its storage delegation boundary.
 
 The storage engine is replaced with an in-memory fake so these tests run with
 no external services while still exercising authorization, size limits and

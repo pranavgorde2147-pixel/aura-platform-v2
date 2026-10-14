@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Any
 
@@ -18,6 +19,7 @@ from app.repositories.knowledge_graph import KnowledgeGraphRepository
 from app.repositories.memory_vault import MemoryVaultRepository
 from app.repositories.personal_ai_brain import PersonalAIBrainRepository
 from app.repositories.timeline import TimelineRepository
+from app.services.app_ingestion import AppAdapter, NormalizedIngestion
 from app.services.brain_provider import (
     GeneralLLMProvider,
     MockGeneralLLMProvider,
@@ -26,6 +28,7 @@ from app.services.brain_provider import (
     PersonalBrainLLMProvider,
     PersonalVaultProvider,
 )
+from app.services.memory_index import MemoryIndexer, NoOpMemoryIndexer, get_memory_indexer
 from app.services.real_brain_provider import RealPersonalBrainLLMProvider
 
 logger = get_logger(__name__)
@@ -40,6 +43,7 @@ class PersonalBrainService:
         llm_provider: PersonalBrainLLMProvider | None = None,
         general_llm_provider: GeneralLLMProvider | None = None,
         vault_provider: PersonalVaultProvider | None = None,
+        memory_indexer: MemoryIndexer | NoOpMemoryIndexer | None = None,
     ):
         """Initialize the service with dependencies."""
         self.session = session
@@ -49,6 +53,17 @@ class PersonalBrainService:
         self.knowledge_repo = KnowledgeGraphRepository(session)
         self.timeline_repo = TimelineRepository(session)
         self.brain_memory_repo = BrainMemoryRepository(session)
+
+        # Semantic retrieval is optional; a no-op indexer keeps keyword search
+        # working when Qdrant or embeddings are unavailable.
+        if memory_indexer is not None:
+            self.memory_indexer = memory_indexer
+        elif llm_provider is not None:
+            # Callers injecting a provider (tests, custom setups) get an inert
+            # indexer unless they explicitly opt in.
+            self.memory_indexer = NoOpMemoryIndexer()
+        else:
+            self.memory_indexer = get_memory_indexer()
         
         # Use real provider if INTERNAL_API_TOKEN is configured, otherwise use mock
         settings = get_settings()
@@ -125,7 +140,7 @@ class PersonalBrainService:
 
         memories: list[BrainMemory] = []
         if use_memory and identity is not None:
-            memories = await self.brain_memory_repo.search_by_identity(identity.id, query, limit=memory_limit)
+            memories = await self._retrieve_memories(identity.id, query, memory_limit)
             if not memories:
                 memories = await self.brain_memory_repo.get_recent_by_identity(identity.id, limit=memory_limit)
 
@@ -186,7 +201,7 @@ class PersonalBrainService:
         source_app: str | None = None,
         importance: int = 0,
     ) -> BrainMemory:
-        """Create and commit a memory record."""
+        """Create a memory record and keep the vector index in sync."""
         memory = await self.brain_memory_repo.create(
             ai_identity_id=ai_identity_id,
             content=content,
@@ -196,8 +211,40 @@ class PersonalBrainService:
             source_app=source_app,
             importance=importance,
         )
+        if self.memory_indexer.enabled:
+            indexed = await self.memory_indexer.index_memory(
+                memory_id=memory.id,
+                ai_identity_id=ai_identity_id,
+                content=content,
+                payload={
+                    "kind": kind.value,
+                    "source": source.value,
+                    "source_app": source_app,
+                    "importance": importance,
+                },
+            )
+            memory.embedding_status = "embedded" if indexed else "failed"
         await self.brain_memory_repo.commit()
         return memory
+
+    async def _retrieve_memories(
+        self, ai_identity_id: uuid.UUID, query: str, limit: int
+    ) -> list[BrainMemory]:
+        """Retrieve memories semantically when possible, else by keyword.
+
+        Vector hits are re-fetched from Postgres (scoped to the identity) so the
+        authoritative record and its provenance are always returned.
+        """
+        if self.memory_indexer.enabled:
+            hits = await self.memory_indexer.search(ai_identity_id, query, limit)
+            if hits:
+                ordered_ids = [memory_id for memory_id, _ in hits]
+                stored = await self.brain_memory_repo.get_by_ids(ai_identity_id, ordered_ids)
+                by_id = {memory.id: memory for memory in stored}
+                ranked = [by_id[memory_id] for memory_id in ordered_ids if memory_id in by_id]
+                if ranked:
+                    return ranked
+        return await self.brain_memory_repo.search_by_identity(ai_identity_id, query, limit=limit)
 
     async def store_memory_for_user(
         self,
@@ -207,16 +254,23 @@ class PersonalBrainService:
         summary: str | None = None,
         source_app: str | None = None,
         importance: int = 0,
+        source: MemorySource | None = None,
     ) -> BrainMemory | None:
-        """Explicitly persist a memory for a user's AI identity."""
+        """Explicitly persist a memory for a user's AI identity.
+
+        ``source`` defaults to USER for facts and BRAIN for interpretations;
+        application ingestion passes ``MemorySource.APP`` explicitly.
+        """
         identity = await self.identity_repo.get_by_user_id(user.id)
         if identity is None:
             return None
+        if source is None:
+            source = MemorySource.USER if kind == MemoryKind.FACT else MemorySource.BRAIN
         return await self._create_memory(
             ai_identity_id=identity.id,
             content=content,
             kind=kind,
-            source=MemorySource.USER if kind == MemoryKind.FACT else MemorySource.BRAIN,
+            source=source,
             summary=summary,
             source_app=source_app,
             importance=importance,
@@ -231,30 +285,184 @@ class PersonalBrainService:
             return []
         return await self.brain_memory_repo.get_by_identity(identity.id, limit=limit, offset=offset)
 
-    async def ingest_data(self, user: User, payload: dict[str, Any]) -> dict[str, Any]:
-        """Classify and route application-ingested data through the Personal Brain provider.
+    async def _record_knowledge(
+        self, ai_identity_id: uuid.UUID, classification: dict[str, Any]
+    ) -> Any:
+        """Increment the identity's knowledge graph node count for this ingest."""
+        labels = classification.get("labels") or []
+        nodes = max(1, len(labels))
+        metadata = json.dumps(
+            {"last_content_type": classification.get("content_type")},
+            ensure_ascii=False,
+        )
+        return await self.knowledge_repo.record_nodes(
+            ai_identity_id, nodes=nodes, graph_metadata=metadata
+        )
 
-        Ingestion is an explicit, application-initiated action, so it persists a
-        ``fact`` memory owned by the user's AI identity.
+    async def _record_timeline(
+        self,
+        ai_identity_id: uuid.UUID,
+        *,
+        event_type: str,
+        resource_type: str | None,
+        resource_reference: str | None,
+        summary: str | None,
+        metadata: dict[str, Any] | None = None,
+    ) -> Any:
+        """Append a dated timeline event for the identity."""
+        return await self.timeline_repo.create(
+            ai_identity_id=ai_identity_id,
+            event_type=event_type,
+            resource_type=resource_type,
+            resource_reference=resource_reference,
+            summary=summary,
+            event_metadata=json.dumps(metadata, ensure_ascii=False) if metadata else None,
+        )
+
+    async def record_ingestion(
+        self,
+        user: User,
+        *,
+        normalized: NormalizedIngestion,
+        source_app: str | None,
+    ) -> dict[str, Any]:
+        """Persist a normalized ingestion and its brain side effects.
+
+        The write is idempotent when ``normalized.dedupe_key`` is set: a prior
+        timeline event with the same ``(event_type, dedupe_key)`` short-circuits
+        the whole operation. The memory is committed first; the vault / knowledge
+        / timeline side effects follow and, if any of them fail, the primary
+        memory is preserved and ``partial`` is reported rather than raising.
+        """
+        identity = await self.identity_repo.get_by_user_id(user.id)
+        if identity is None:
+            return {
+                "accepted": False,
+                "reason": "brain_not_found",
+                "event_type": normalized.event_type,
+                "memory_id": None,
+                "vault_entry_id": None,
+            }
+
+        if normalized.dedupe_key:
+            existing = await self.timeline_repo.find_by_reference(
+                identity.id, normalized.event_type, normalized.dedupe_key
+            )
+            if existing is not None:
+                return {
+                    "accepted": True,
+                    "duplicate": True,
+                    "event_type": normalized.event_type,
+                    "memory_id": _metadata_memory_id(existing.event_metadata),
+                    "vault_entry_id": None,
+                }
+
+        memory = None
+        if normalized.persist_memory:
+            memory = await self.store_memory_for_user(
+                user,
+                content=normalized.content,
+                kind=normalized.kind,
+                summary=normalized.summary,
+                source_app=source_app,
+                importance=normalized.importance,
+                source=MemorySource.APP,
+            )
+
+        vault_entry = None
+        partial = False
+        try:
+            if normalized.vault and normalized.vault.get("object_reference"):
+                vault_entry = await self.memory_repo.upsert_for_identity(
+                    identity.id, **_vault_fields(normalized.vault)
+                )
+            await self._record_knowledge(
+                identity.id,
+                {
+                    "labels": list(normalized.labels),
+                    "content_type": normalized.event_type,
+                },
+            )
+            await self._record_timeline(
+                identity.id,
+                event_type=normalized.event_type,
+                resource_type=normalized.resource_type,
+                resource_reference=normalized.dedupe_key
+                or (str(memory.id) if memory else None),
+                summary=normalized.summary,
+                metadata={
+                    "source_app": source_app,
+                    "memory_id": str(memory.id) if memory else None,
+                    "dedupe_key": normalized.dedupe_key,
+                    **(normalized.metadata or {}),
+                },
+            )
+            await self.timeline_repo.commit()
+        except Exception as exc:  # noqa: BLE001 - side effects must not lose the memory
+            partial = True
+            logger.warning(
+                "Partial ingestion for app %s (memory preserved): %s",
+                source_app,
+                type(exc).__name__,
+            )
+            try:
+                await self.timeline_repo.rollback()
+            except Exception:  # pragma: no cover - rollback is best-effort
+                pass
+
+        return {
+            "accepted": True,
+            "duplicate": False,
+            "partial": partial,
+            "event_type": normalized.event_type,
+            "memory_id": str(memory.id) if memory else None,
+            "vault_entry_id": str(vault_entry.id) if vault_entry else None,
+        }
+
+    async def ingest_app_event(
+        self,
+        user: User,
+        adapter: AppAdapter,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Normalize and persist one application event through the brain boundary."""
+        normalized = adapter.normalize(payload)
+        return await self.record_ingestion(
+            user, normalized=normalized, source_app=adapter.slug
+        )
+
+    async def ingest_data(self, user: User, payload: dict[str, Any]) -> dict[str, Any]:
+        """Classify and route application-ingested data through the Personal Brain.
+
+        Generic ingestion used by ``POST /api/v1/brain/ingest``. Adapters with
+        stricter, app-specific shapes use :meth:`ingest_app_event` instead.
         """
         classification = await self.llm_provider.classify_information(user, payload)
         vault_result = await self.vault_provider.store_ingestion(user, payload)
 
-        memory = await self.store_memory_for_user(
-            user,
+        flat_vault = {**payload, **(payload.get("metadata") or {})}
+        normalized = NormalizedIngestion(
             content=str(payload.get("content", "")),
             kind=MemoryKind.FACT,
+            event_type="memory.ingested",
             summary=classification.get("summary"),
-            source_app=payload.get("source_app"),
+            resource_type="memory",
+            labels=tuple(classification.get("labels") or []),
             importance=10,
+            vault=flat_vault,
+            metadata={"content_type": classification.get("content_type")},
+        )
+        result = await self.record_ingestion(
+            user, normalized=normalized, source_app=payload.get("source_app")
         )
 
         return {
-            "accepted": True,
+            "accepted": result["accepted"],
             "classification": classification,
             "stored": vault_result.get("stored", True),
             "vault_reference": vault_result,
-            "memory_id": memory.id if memory else None,
+            "memory_id": result.get("memory_id"),
+            "vault_entry_id": result.get("vault_entry_id"),
         }
 
     async def get_brain_context(self, ai_identity_id: uuid.UUID) -> dict:
@@ -308,6 +516,18 @@ class PersonalBrainService:
             return memory
         updated = await self.brain_memory_repo.update(memory_id, **updates)
         await self.brain_memory_repo.commit()
+        if updated is not None and "content" in updates and self.memory_indexer.enabled:
+            await self.memory_indexer.index_memory(
+                memory_id=updated.id,
+                ai_identity_id=identity.id,
+                content=updated.content,
+                payload={
+                    "kind": updated.kind.value,
+                    "source": updated.source.value,
+                    "source_app": updated.source_app,
+                    "importance": updated.importance,
+                },
+            )
         return updated
 
     async def delete_memory_for_user(self, user: User, memory_id: uuid.UUID) -> bool:
@@ -320,6 +540,8 @@ class PersonalBrainService:
             return False
         result = await self.brain_memory_repo.delete(memory_id)
         await self.brain_memory_repo.commit()
+        if result and self.memory_indexer.enabled:
+            await self.memory_indexer.delete(memory_id)
         return result
 
     async def get_memory_for_user(self, user: User, memory_id: uuid.UUID) -> BrainMemory | None:
@@ -339,7 +561,7 @@ class PersonalBrainService:
         identity = await self.identity_repo.get_by_user_id(user.id)
         if identity is None:
             return []
-        return await self.brain_memory_repo.search_by_identity(identity.id, query, limit=limit)
+        return await self._retrieve_memories(identity.id, query, limit)
 
     async def update_sync_version(self, ai_identity_id: uuid.UUID) -> PersonalAIBrain | None:
         """Update the sync version of a brain."""
@@ -356,3 +578,30 @@ class PersonalBrainService:
         )
         await self.brain_repo.commit()
         return updated
+
+
+def _vault_fields(vault: dict[str, Any]) -> dict[str, Any]:
+    """Map a normalized vault pointer dict to repository keyword arguments."""
+    size = vault.get("file_size_bytes")
+    return {
+        "object_reference": str(vault["object_reference"]),
+        "storage_type": str(vault.get("storage_type") or "object"),
+        "checksum": vault.get("checksum"),
+        "mime_type": vault.get("mime_type"),
+        "file_size_bytes": int(size) if size is not None else None,
+        "processing_status": str(vault.get("processing_status") or "stored"),
+    }
+
+
+def _metadata_memory_id(event_metadata: str | None) -> str | None:
+    """Extract ``memory_id`` from a stored timeline event's JSON metadata."""
+    if not event_metadata:
+        return None
+    try:
+        data = json.loads(event_metadata)
+    except (ValueError, TypeError):
+        return None
+    if isinstance(data, dict):
+        value = data.get("memory_id")
+        return str(value) if value else None
+    return None

@@ -1,4 +1,4 @@
-"""Configuration for AURA Server 3 - Storage Engine.
+"""Configuration for Server 2 object storage.
 
 All values are environment driven. No credentials are ever hardcoded.
 """
@@ -33,7 +33,7 @@ class Settings:
     version: str = "1.0.0"
     environment: str = "development"
     host: str = "0.0.0.0"
-    port: int = 8002
+    port: int = 8001
 
     # Internal service authentication. Required for all object endpoints.
     internal_api_token: str = ""
@@ -82,7 +82,7 @@ def get_settings() -> Settings:
         version=os.getenv("SERVICE_VERSION", "1.0.0"),
         environment=os.getenv("ENVIRONMENT", "development"),
         host=os.getenv("HOST", "0.0.0.0"),
-        port=_int("PORT", 8002),
+        port=_int("PORT", 8001),
         internal_api_token=os.getenv("STORAGE_API_TOKEN", "").strip()
         or os.getenv("INTERNAL_API_TOKEN", "").strip(),
         backend=os.getenv("STORAGE_BACKEND", "local").strip().lower(),

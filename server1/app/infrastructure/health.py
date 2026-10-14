@@ -2,9 +2,9 @@
 
 Liveness ("is the process up?") is intentionally separated from readiness
 ("can this instance serve traffic?"). Readiness requires the core datastores
-(PostgreSQL, Redis, Qdrant). Server 2 (AI) and Server 3 (storage) are reported
-as dependencies; their absence degrades the platform but does not make core
-identity/auth operations unavailable.
+(PostgreSQL, Redis, Qdrant). Server 2 (AI inference) and Server 2's storage API
+are reported as dependencies; their absence degrades the platform but does not
+make core identity/auth operations unavailable.
 """
 
 from __future__ import annotations
@@ -18,9 +18,9 @@ from app.infrastructure.brain_client import get_brain_client
 from app.infrastructure.database.health import check_database_health
 from app.infrastructure.database.session import get_db
 from app.infrastructure.qdrant.client import qdrant_client
-from app.infrastructure.qdrant.health import check_qdrant_health
+from app.infrastructure.qdrant.health import probe_qdrant
 from app.infrastructure.redis.client import redis_client
-from app.infrastructure.storage_client import get_storage_client
+from app.infrastructure.storage_client import StorageConfigurationError, get_storage_client
 
 
 async def _check_database() -> dict[str, Any]:
@@ -47,10 +47,15 @@ async def _check_redis() -> dict[str, Any]:
 async def _check_qdrant() -> dict[str, Any]:
     try:
         client = qdrant_client.connect()
-        ok = await asyncio.to_thread(check_qdrant_health, client)
-        return {"status": "connected" if ok else "disconnected"}
-    except Exception as exc:  # pragma: no cover - runtime guard
-        return {"status": "disconnected", "error": type(exc).__name__}
+    except Exception:  # configuration errors (e.g. missing/invalid QDRANT_URL)
+        return {"status": "disconnected", "reason": "configuration_error"}
+    probe = await asyncio.to_thread(probe_qdrant, client)
+    if probe.ok:
+        return {"status": "connected"}
+    result: dict[str, Any] = {"status": "disconnected"}
+    if probe.reason:
+        result["reason"] = probe.reason
+    return result
 
 
 async def _check_ai_server() -> dict[str, Any]:
@@ -66,11 +71,22 @@ async def _check_ai_server() -> dict[str, Any]:
 async def _check_storage_server() -> dict[str, Any]:
     try:
         result = await get_storage_client().health_check()
+    except StorageConfigurationError:
+        return {"status": "unavailable", "reason": "configuration_error"}
     except Exception as exc:  # pragma: no cover - runtime guard
         return {"status": "unavailable", "error": type(exc).__name__}
     if result is None:
         return {"status": "unavailable"}
-    return {"status": "connected", "backend": result.get("backend")}
+    if result.get("status") not in ("ready", "ok"):
+        status: dict[str, Any] = {"status": "unavailable", "reason": "not_ready"}
+        if result.get("http_status") is not None:
+            status["http_status"] = result["http_status"]
+        return status
+    return {
+        "status": "connected",
+        "backend": result.get("backend"),
+        "service": result.get("service"),
+    }
 
 
 async def gather_infrastructure_health() -> dict[str, Any]:
