@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hmac
 import json
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -27,26 +29,51 @@ except RuntimeError:
     pass
 
 
+def _load_env_file() -> None:
+    """Load ``server2/.env`` for local runs.
+
+    Real environment variables always win over the file (``override=False``), so
+    Docker/Render/CI settings are never clobbered. Set ``AURA_SKIP_DOTENV=1`` to
+    disable loading (the test suite does this so filesystem state stays isolated).
+    """
+    if os.getenv("AURA_SKIP_DOTENV", "").lower() in {"1", "true", "yes", "on"}:
+        return
+    try:
+        from dotenv import load_dotenv
+    except ImportError:  # python-dotenv is optional
+        return
+    load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
+
+
+_load_env_file()
+
+DEFAULT_MODEL_NAME = "Qwen3.5-0.8B"
+DEFAULT_GGUF_FILENAME = "Qwen3.5-0.8B-Q4_K_M.gguf"
+
+
 def _model_name() -> str:
-    return os.getenv("MODEL_NAME", "Qwen3.5-4B")
+    return os.getenv("MODEL_NAME", DEFAULT_MODEL_NAME)
 
 
 def _model_path() -> Path:
     # Resolution order: explicit MODEL_PATH, the in-container mount, then the
     # repo-relative models directory (so local runs need no configuration).
+    # Both GGUF files and transformers directories are supported.
     configured = os.getenv("MODEL_PATH")
-    repo_model = Path(__file__).resolve().parents[1] / "models" / "Qwen3.5-4B"
+    repo_models = Path(__file__).resolve().parents[1] / "models"
     candidates = [
         Path(configured) if configured else None,
-        Path("/models/Qwen3.5-4B"),
-        repo_model,
+        Path("/models") / DEFAULT_GGUF_FILENAME,
+        Path("/models") / DEFAULT_MODEL_NAME,
+        repo_models / DEFAULT_GGUF_FILENAME,
+        repo_models / DEFAULT_MODEL_NAME,
     ]
     for candidate in candidates:
         if candidate is not None and candidate.exists():
             return candidate
     if configured:
         return Path(configured)
-    return Path("/models/Qwen3.5-4B")
+    return Path("/models") / DEFAULT_GGUF_FILENAME
 
 
 def _internal_api_token() -> str:
@@ -167,9 +194,6 @@ class ModelRuntime:
         self.ready = True
 
 
-MODEL_RUNTIME = ModelRuntime(_model_path())
-
-
 class GGUFRuntime:
     """Runtime for GGUF checkpoints loaded through llama.cpp.
 
@@ -219,24 +243,59 @@ class GGUFRuntime:
         self.quantization = quant or "gguf"
         self.ready = True
 
-    def generate(self, prompt: str, *, max_new_tokens: int, temperature: float, top_p: float) -> str:
+    def _sampling_kwargs(self, max_new_tokens: int, temperature: float, top_p: float) -> dict[str, Any]:
+        return {
+            "max_tokens": max_new_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "repeat_penalty": float(os.getenv("REPEAT_PENALTY", "1.2")),
+            "min_p": float(os.getenv("MIN_P", "0.05")),
+        }
+
+    def generate(self, system: str, user: str, *, max_new_tokens: int, temperature: float, top_p: float) -> str:
+        """Generate a reply using the model's chat template.
+
+        Raw completion makes this small hybrid checkpoint echo the prompt and
+        loop; the GGUF's embedded chat template applies the right special tokens
+        and stop sequences, which keeps output on-topic and terminating.
+        """
         if self.model is None or not self.ready:
             raise RuntimeError("GGUF model is not loaded")
-        result = self.model(
-            prompt,
-            max_tokens=max_new_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            repeat_penalty=float(os.getenv("REPEAT_PENALTY", "1.2")),
-            min_p=float(os.getenv("MIN_P", "0.05")),
-            echo=False,
-        )
-        if isinstance(result, dict):
-            choices = result.get("choices") or []
-            if choices and isinstance(choices[0], dict):
-                return str(choices[0].get("text", "")).strip()
-            return ""
-        return str(result).strip()
+        kwargs = self._sampling_kwargs(max_new_tokens, temperature, top_p)
+        try:
+            result = self.model.create_chat_completion(
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                **kwargs,
+            )
+            text = result["choices"][0]["message"]["content"]
+        except Exception:
+            # Checkpoints without a usable chat template fall back to completion.
+            prompt = f"{system}\nUser query: {user}"
+            result = self.model(prompt, echo=False, **kwargs)
+            choices = result.get("choices") if isinstance(result, dict) else None
+            text = str(choices[0].get("text", "")) if choices else str(result)
+        return _clean_gguf_output(str(text))
+
+
+_THINK_PAIR = re.compile(r"<think\b[^>]*>.*?</think\s*>", re.IGNORECASE | re.DOTALL)
+_THINK_OPEN = re.compile(r"<think\b[^>]*>.*$", re.IGNORECASE | re.DOTALL)
+_PROMPT_ECHO = re.compile(r"^\s*user query\s*:.*?(?:\n|$)", re.IGNORECASE)
+
+
+def _clean_gguf_output(text: str) -> str:
+    """Strip reasoning tags and echoed prompt lines from a GGUF completion.
+
+    Small hybrid checkpoints (Qwen3.5-0.8B) tend to emit `` thinking`` blocks and
+    to re-echo the prompt's trailing "User query:" line even when instructed not
+    to. Neither belongs in the API response.
+    """
+    cleaned = _THINK_PAIR.sub("", text)
+    cleaned = _THINK_OPEN.sub("", cleaned)
+    cleaned = _PROMPT_ECHO.sub("", cleaned)
+    return cleaned.strip()
 
 
 def _is_gguf_path(path: Path) -> bool:
@@ -248,6 +307,9 @@ def _build_runtime(path: Path):
     if _is_gguf_path(path):
         return GGUFRuntime(path)
     return ModelRuntime(path)
+
+
+MODEL_RUNTIME = _build_runtime(_model_path())
 
 
 def _is_valid_uuid(value: str | None) -> bool:
@@ -263,7 +325,8 @@ def _is_valid_uuid(value: str | None) -> bool:
 def _get_runtime():
     path = _model_path()
     global MODEL_RUNTIME
-    if MODEL_RUNTIME.model_path != path or type(MODEL_RUNTIME).__name__ != ("GGUFRuntime" if _is_gguf_path(path) else "ModelRuntime"):
+    expected_type = "GGUFRuntime" if _is_gguf_path(path) else "ModelRuntime"
+    if MODEL_RUNTIME is None or MODEL_RUNTIME.model_path != path or type(MODEL_RUNTIME).__name__ != expected_type:
         MODEL_RUNTIME = _build_runtime(path)
     if _skip_model_load():
         return MODEL_RUNTIME
@@ -346,7 +409,8 @@ def ready() -> dict[str, bool | str]:
     return {"status": "ready" if model_ready else "not_ready", "model": model_name, "provider": provider, "model_loaded": model_ready}
 
 
-def _build_prompt(query: str, context: dict[str, Any]) -> str:
+def _build_messages(query: str, context: dict[str, Any]) -> tuple[str, str]:
+    """Return (system, user) prompts with sensitive context keys stripped."""
     safe_context = {k: v for k, v in (context or {}).items() if k not in {"vault", "password", "secret", "token", "jwt"}}
     user_level = safe_context.get("user_level")
     relevant_context = safe_context.get("relevant_context", {})
@@ -370,12 +434,18 @@ def _build_prompt(query: str, context: dict[str, Any]) -> str:
         context_lines.append(f"Relevant context: {json.dumps(relevant_context, ensure_ascii=False, sort_keys=True)}")
     if safety_constraints:
         context_lines.append(f"Safety constraints: {json.dumps(safety_constraints, ensure_ascii=False, sort_keys=True)}")
-    context_lines.append(f"User query: {query}")
-    return "\n".join(context_lines)
+
+    return "\n".join(context_lines), query
+
+
+def _build_prompt(query: str, context: dict[str, Any]) -> str:
+    """Flatten the messages into a single completion prompt (transformers/external)."""
+    system, user = _build_messages(query, context)
+    return f"{system}\nUser query: {user}"
 
 
 def _generate_test_response() -> str:
-    return "This is a test-mode response generated without loading the 8.8 GiB Qwen3.5-4B checkpoint."
+    return "This is a test-mode response generated without loading the local Qwen3.5 checkpoint."
 
 
 # External-hosted LLM proxy helper
@@ -426,7 +496,8 @@ async def brain_infer(request: Request, authorization: str | None = Header(defau
 
     token = authorization.split(" ", 1)[1].strip()
     expected_token = _internal_api_token()
-    if not expected_token or token != expected_token:
+    # Constant-time comparison avoids leaking the token length/prefix via timing.
+    if not expected_token or not hmac.compare_digest(token, expected_token):
         raise HTTPException(status_code=401, detail="Invalid internal API token")
 
     payload = await request.json()
@@ -498,23 +569,25 @@ async def brain_infer(request: Request, authorization: str | None = Header(defau
     try:
         runtime = _get_runtime()
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Qwen3.5-4B model is unavailable: {exc}") from exc
+        raise HTTPException(status_code=503, detail=f"{_model_name()} model is unavailable: {exc}") from exc
 
     if not runtime.ready or runtime.model is None:
-        raise HTTPException(status_code=503, detail="Qwen3.5-4B model is unavailable")
+        raise HTTPException(status_code=503, detail=f"{_model_name()} model is unavailable")
 
-    prompt = _build_prompt(query.strip(), context)
     start = time.perf_counter()
 
     if isinstance(runtime, GGUFRuntime):
+        system, user_query = _build_messages(query.strip(), context)
         response_text = runtime.generate(
-            prompt,
+            system,
+            user_query,
             max_new_tokens=int(os.getenv("MAX_NEW_TOKENS", "96")),
             temperature=float(os.getenv("TEMPERATURE", "0.2")),
             top_p=float(os.getenv("TOP_P", "0.8")),
         )
         generated_tokens = len(response_text.split())
     else:
+        prompt = _build_prompt(query.strip(), context)
         inputs = runtime.tokenizer(prompt, return_tensors="pt")
         inputs = {k: v.to(runtime.device) for k, v in inputs.items()}
 

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from app.core.security import hash_password
+from app.infrastructure.brain_client import BrainServiceError
 from app.models.user import User
 from app.services import real_brain_provider
 from app.services.real_brain_provider import RealPersonalBrainLLMProvider
@@ -66,6 +67,39 @@ def test_no_fallback_when_disabled(monkeypatch):
         result = await provider.process_query(make_user(), "hello", {})
 
         assert result["source"] == "server2_error"
+
+    asyncio.run(_run())
+
+
+def test_server2_errors_are_sanitized_for_clients(monkeypatch):
+    async def _run():
+        monkeypatch.setattr(
+            real_brain_provider,
+            "get_brain_client",
+            lambda: SimpleNamespace(
+                infer=AsyncMock(
+                    side_effect=BrainServiceError(
+                        "brain_unreachable",
+                        "AURA Brain service is unreachable",
+                    )
+                )
+            ),
+        )
+        monkeypatch.setenv("AI_FALLBACK_ENABLED", "false")
+        from app.core.config import get_settings
+
+        get_settings.cache_clear()
+
+        provider = RealPersonalBrainLLMProvider()
+        result = await provider.process_query(make_user(), "hello", {"schedule": "busy"})
+
+        assert result["source"] == "server2_error"
+        assert result["error_code"] == "brain_unreachable"
+        # No raw exception/host detail is echoed back to the client.
+        assert result["answer"] == (
+            "The AURA Brain is temporarily unavailable. Please try again shortly."
+        )
+        assert "Traceback" not in result["answer"]
 
     asyncio.run(_run())
 

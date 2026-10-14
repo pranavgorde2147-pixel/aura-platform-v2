@@ -14,6 +14,10 @@ class BrainQueryRequest(BaseModel):
 
     query: str = Field(..., min_length=1, max_length=5000)
     context: dict[str, Any] | None = None
+    # Optional originating app slug. When supplied, the caller must have an
+    # active connection to that app with the ``brain:read`` permission before
+    # the request is forwarded to Server 2.
+    source_app: str | None = Field(default=None, max_length=64)
     # Retrieval and persistence are opt-in. Conversations are never saved
     # automatically.
     use_memory: bool = False
@@ -40,6 +44,9 @@ class BrainQueryResponse(BaseModel):
     model: str | None = None
     latency_ms: int | None = None
     tokens_used: int | None = None
+    # Present only when the brain/source returned a structured failure; never
+    # contains credentials or internal network details.
+    error_code: str | None = None
     # Distinguishes retrieved facts from AI generated text.
     memories_used: list[MemoryReference] = Field(default_factory=list)
     persisted_memory_id: uuid.UUID | None = None

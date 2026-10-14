@@ -167,6 +167,7 @@ class PersonalBrainService:
             "model": raw.get("model"),
             "latency_ms": raw.get("latency_ms"),
             "tokens_used": raw.get("tokens_used"),
+            "error_code": raw.get("error_code"),
             "minimal_external_context": prepared_context,
             "memories_used": [
                 {"id": mem.id, "kind": mem.kind.value, "source": mem.source.value, "content": mem.content}

@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 
 from app.core.config import get_settings
-from app.infrastructure.brain_client import get_brain_client
+from app.infrastructure.brain_client import BrainServiceError, get_brain_client
 from app.models.user import User
 
 logger = logging.getLogger(__name__)
@@ -114,7 +114,10 @@ class RealPersonalBrainLLMProvider:
                 "tokens_used": response.get("tokens_used"),
             }
         except Exception as e:
-            logger.error(f"Failed to process query via Server 2: {e}")
+            # Log the failure class server-side only. The raw exception string
+            # may embed hostnames/URLs and must never reach the client.
+            error_code = e.error_code if isinstance(e, BrainServiceError) else "brain_error"
+            logger.error("Failed to process query via Server 2 (%s): %s", error_code, type(e).__name__)
             fallback_answer = await self._try_external_fallback(query, context)
             if fallback_answer is not None:
                 logger.warning("Server 2 unreachable; answered via external AI fallback")
@@ -124,14 +127,14 @@ class RealPersonalBrainLLMProvider:
                     "context_used": bool(context),
                     "user_id": str(user.id),
                     "model": get_settings().ai_fallback_model,
-                    "error": str(e),
+                    "error_code": error_code,
                 }
             return {
-                "answer": f"Error: Unable to process query - {str(e)}",
+                "answer": "The AURA Brain is temporarily unavailable. Please try again shortly.",
                 "source": "server2_error",
                 "context_used": False,
                 "user_id": str(user.id),
-                "error": str(e),
+                "error_code": error_code,
             }
 
     async def classify_information(

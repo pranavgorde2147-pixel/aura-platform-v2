@@ -322,6 +322,31 @@ class AppConnectionService:
         )
         return result.scalars().first()
 
+    async def has_active_permission(
+        self,
+        user: User,
+        slug: str,
+        scope: str,
+        action: str,
+    ) -> bool:
+        """Return True when the user has an active, matching app permission.
+
+        Used to gate brain forwarding so an app can only trigger inference on
+        behalf of a user who has actually authorized it.
+        """
+        result = await self.session.execute(
+            select(ModulePermission.id)
+            .join(InstalledModule, ModulePermission.installed_module_id == InstalledModule.id)
+            .where(
+                InstalledModule.user_id == user.id,
+                InstalledModule.module_slug == slug,
+                InstalledModule.is_active.is_(True),
+                ModulePermission.scope == scope,
+                ModulePermission.permission == PermissionAction(action),
+            )
+        )
+        return result.scalars().first() is not None
+
     async def install(
         self,
         user: User,

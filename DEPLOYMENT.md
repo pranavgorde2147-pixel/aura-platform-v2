@@ -71,27 +71,52 @@ and `model: Qwen3.5-0.8B`.
 
 ### 2. Expose it to Server 1 without port forwarding
 
-**Cloudflare Tunnel (recommended, free, works behind CGNAT):**
+Server 1 runs on Render, so it can only originate **outbound** connections; it
+cannot dial `127.0.0.1` or a `100.x` tailnet address on your laptop. The tunnel
+must therefore be outbound-only from the laptop (no inbound port opened) and
+reachable from Render as an HTTPS endpoint.
 
-```bash
-cloudflared tunnel --url http://127.0.0.1:8001
-```
+**Recommended: Cloudflare Tunnel + Cloudflare Access (service token).**
+`cloudflared` dials out to Cloudflare, so it works behind CGNAT and opens no
+inbound port. Cloudflare Access then requires a service token on every request,
+so the hostname is not usable by anonymous callers and the origin stays private.
 
-Copy the printed `https://<random>.trycloudflare.com` URL. It changes on every
-restart, so for a stable setup create a *named* tunnel against your own domain.
+1. Create a *named* tunnel for the hostname (for example `brain.example.com`),
+   pointing at `http://127.0.0.1:8001`, and run `cloudflared` on the laptop.
+   A quick throwaway tunnel also works but changes URL on every restart:
+   ```bash
+   cloudflared tunnel --url http://127.0.0.1:8001
+   ```
+2. In Cloudflare Zero Trust, create a **service token** and an Access
+   application/policy for the hostname that requires that token.
+3. On Server 1 set `AI_ACCESS_CLIENT_ID` / `AI_ACCESS_CLIENT_SECRET` to the
+   service token values. Server 1 sends them as
+   `CF-Access-Client-Id` / `CF-Access-Client-Secret`, so Access admits the
+   request before it reaches the laptop. `INTERNAL_API_TOKEN` remains the
+   second, application-layer check enforced by Server 2.
 
-Alternatives: `ngrok http 8001`, or **Tailscale** (private - only works if
-Server 1 runs on a host you control, not Render).
+> **Tailscale caveat (verified):** Render web services run in unprivileged
+> containers without `NET_ADMIN`/TUN, so a Render service cannot join a tailnet
+> like a normal node. Tailscale *is* usable on Render, but only via userspace
+> networking (a `tailscaled --tun=userspace-networking` sidecar/proxy inside the
+> Server 1 container) or a separate Render subnet-router service. That requires
+> Dockerfile/startup changes and an auth key. Cloudflare Tunnel avoids all of
+> that while still keeping Server 2's port closed.
+>
+> Do **not** expose port 8001 directly to the public internet and do not disable
+> TLS verification or the token checks.
 
 ### 3. Point Server 1 at the tunnel
 
-In Server 1's environment:
+In Server 1's environment (Render dashboard secrets - never in the repo):
 
 ```env
-AI_SERVER_URL=https://<random>.trycloudflare.com
-STORAGE_SERVER_URL=https://<random>.trycloudflare.com
-INTERNAL_API_TOKEN=<same token>
+AI_SERVER_URL=https://brain.example.com
+STORAGE_SERVER_URL=https://brain.example.com   # only if storage lives on the laptop too
+INTERNAL_API_TOKEN=<same strong token as Server 2>
 AI_SERVER_MODEL=Qwen3.5-0.8B
+AI_ACCESS_CLIENT_ID=<cloudflare access client id>
+AI_ACCESS_CLIENT_SECRET=<cloudflare access client secret>
 ```
 
 ### 4. Keep the laptop alive

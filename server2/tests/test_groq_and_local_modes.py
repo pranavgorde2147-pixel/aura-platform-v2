@@ -56,7 +56,7 @@ def test_groq_external_mode_forwards(monkeypatch):
         "query": "Reply in one short sentence explaining what you can do.",
         "context": {"user_level": "general", "relevant_context": {}, "safety_constraints": []},
         "request_id": "6ba7b810-9dad-11d8-80b4-00c04fd430c8",
-        "model": "Qwen3.5-4B",
+        "model": "Qwen3.5-0.8B",
     }
     resp = client.post("/v1/brain/infer", json=payload, headers={"Authorization": "Bearer test-token"})
     assert resp.status_code == 200, resp.text
@@ -106,11 +106,11 @@ def test_local_model_mode_with_fake_runtime(monkeypatch):
         "query": "Reply in one short sentence explaining what you can do.",
         "context": {"user_level": "general", "relevant_context": {}, "safety_constraints": []},
         "request_id": "6ba7b810-9dad-11d8-80b4-00c04fd430c8",
-        "model": "Qwen3.5-4B",
+        "model": "Qwen3.5-0.8B",
     }
 
     resp = client.post("/v1/brain/infer", json=payload, headers={"Authorization": "Bearer test-token"})
     assert resp.status_code == 200, resp.text
     data = resp.json()
     assert data["response"] == "Local model reply"
-    assert data["model"] == "Qwen3.5-4B"
+    assert data["model"] == "Qwen3.5-0.8B"

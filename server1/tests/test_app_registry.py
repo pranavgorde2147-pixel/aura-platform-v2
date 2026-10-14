@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 
 import pytest
 from fastapi.testclient import TestClient
@@ -194,6 +195,20 @@ def test_revoke_deletes_module_and_permissions():
     session2 = FakeSession(results=[[]])
     service2 = AppConnectionService(session2)
     assert asyncio.run(service2.revoke(user, module.id)) is False
+
+
+def test_has_active_permission_true_when_granted():
+    user = make_user()
+    session = FakeSession(results=[[uuid.uuid4()]])
+    service = AppConnectionService(session)
+    assert asyncio.run(service.has_active_permission(user, "brain", "brain", "read")) is True
+
+
+def test_has_active_permission_false_when_absent():
+    user = make_user()
+    session = FakeSession(results=[[]])
+    service = AppConnectionService(session)
+    assert asyncio.run(service.has_active_permission(user, "brain", "brain", "read")) is False
 
 
 def test_connection_endpoints_require_auth():

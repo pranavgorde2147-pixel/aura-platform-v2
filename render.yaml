@@ -11,8 +11,11 @@ services:
     envVars:
       - key: ENVIRONMENT
         value: production
+      # Must match the model served behind AI_SERVER_URL. The GPU laptop runs
+      # the local Qwen3.5-0.8B GGUF, so set this to Qwen3.5-0.8B when Server 1
+      # is pointed at the laptop tunnel.
       - key: AI_SERVER_MODEL
-        value: qwen/qwen3.8-27b
+        value: Qwen3.5-0.8B
       # Set values in the Render dashboard (secrets never committed):
       - key: POSTGRES_URL
         sync: false
@@ -24,11 +27,17 @@ services:
         sync: false
       - key: INTERNAL_API_TOKEN
         sync: false
+      # Secure tunnel origin for the laptop's Server 2 (NOT localhost/127.0.0.1).
       - key: AI_SERVER_URL
         sync: false
       - key: STORAGE_SERVER_URL
         sync: false
       - key: STORAGE_API_TOKEN
+        sync: false
+      # Optional Cloudflare Access service token for the tunnel (set both or neither).
+      - key: AI_ACCESS_CLIENT_ID
+        sync: false
+      - key: AI_ACCESS_CLIENT_SECRET
         sync: false
       - key: CORS_ALLOWED_ORIGINS
         sync: false

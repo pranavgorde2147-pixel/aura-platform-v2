@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     ai_server_url: str = Field(default="http://localhost:8001", alias="AI_SERVER_URL")
     ai_server_model: str = Field(default="Qwen3.5-0.8B", alias="AI_SERVER_MODEL")
     internal_api_token: str = Field(default="", alias="INTERNAL_API_TOKEN")
+    # Optional edge/gateway credentials (for example a Cloudflare Access service
+    # token) sent to the Server 2 endpoint so a public tunnel only serves
+    # authenticated service traffic. Both must be set to take effect.
+    ai_access_client_id: str = Field(default="", alias="AI_ACCESS_CLIENT_ID")
+    ai_access_client_secret: str = Field(default="", alias="AI_ACCESS_CLIENT_SECRET")
     # Object storage API (formerly Server 3, now hosted by Server 2). Falls back
     # to INTERNAL_API_TOKEN when unset.
     storage_server_url: str = Field(default="http://localhost:8001", alias="STORAGE_SERVER_URL")
@@ -55,8 +60,13 @@ class Settings(BaseSettings):
     ai_fallback_url: str = Field(default="", alias="AI_FALLBACK_URL")
     ai_fallback_key: str = Field(default="", alias="AI_FALLBACK_KEY")
     ai_fallback_model: str = Field(default="llama-3.1-8b-instant", alias="AI_FALLBACK_MODEL")
-    # Outbound integration behaviour
+    # Outbound integration behaviour. Network failure handling is intentionally
+    # bounded: a fixed number of retries with linear backoff, never a loop.
     ai_request_timeout_seconds: float = Field(default=120.0, alias="AI_REQUEST_TIMEOUT_SECONDS")
+    ai_connect_timeout_seconds: float = Field(default=5.0, alias="AI_CONNECT_TIMEOUT_SECONDS")
+    ai_max_retries: int = Field(default=2, alias="AI_MAX_RETRIES")
+    ai_retry_backoff_seconds: float = Field(default=0.5, alias="AI_RETRY_BACKOFF_SECONDS")
+    ai_verify_tls: bool = Field(default=True, alias="AI_VERIFY_TLS")
     storage_request_timeout_seconds: float = Field(default=60.0, alias="STORAGE_REQUEST_TIMEOUT_SECONDS")
     max_upload_size_bytes: int = Field(default=50 * 1024 * 1024, alias="MAX_UPLOAD_SIZE_BYTES")
     # Optional embedded Qdrant mode for local development/tests. When set, the

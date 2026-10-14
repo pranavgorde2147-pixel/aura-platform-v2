@@ -19,6 +19,7 @@ from app.schemas.brain import (
     MemoryResponse,
     MemoryUpdateRequest,
 )
+from app.services.app_registry import AppConnectionService
 from app.services.personal_brain import PersonalBrainService
 
 router = APIRouter(prefix="/brain", tags=["Brain"])
@@ -31,6 +32,16 @@ async def query_brain(
     session: AsyncSession = Depends(get_db),
 ) -> BrainQueryResponse:
     """Process a user query through their Personal Brain."""
+    if payload.source_app:
+        authorized = await AppConnectionService(session).has_active_permission(
+            current_user, payload.source_app, scope="brain", action="read"
+        )
+        if not authorized:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="App is not authorized to query this user's brain",
+            )
+
     service = PersonalBrainService(session)
     result = await service.process_query(
         current_user,
