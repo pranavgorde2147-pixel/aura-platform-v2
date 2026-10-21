@@ -9,10 +9,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.models.installed_module import InstalledModule, PlatformType
+from app.models.module_permission import ModulePermission, PermissionAction
 from app.main import create_app
+from app.schemas.apps import ModulePermissionSpec
 from app.services.app_registry import (
     AppAlreadyInstalledError,
     AppConnectionService,
+    AppPermissionNotAllowedError,
     UnknownAppError,
     list_catalog,
 )
@@ -96,6 +99,10 @@ def test_aura_core_registry_requires_only_brain_read_for_queries():
     assert {(permission.scope, permission.action) for permission in aura_core.default_permissions} == {
         ("brain", "read")
     }
+    assert {
+        (permission.scope, permission.action)
+        for permission in aura_core.additional_permissions
+    } == {("identity", "read")}
 
 
 def test_catalog_endpoints_are_public():
@@ -162,7 +169,6 @@ def test_install_custom_permissions_replace_defaults():
     user = make_user()
     session = FakeSession(results=[[]])
     service = AppConnectionService(session)
-    from app.schemas.apps import ModulePermissionSpec
 
     module = asyncio.run(
         service.install(user, "brain", permissions=[ModulePermissionSpec(scope="memory", action="read")])
@@ -171,6 +177,23 @@ def test_install_custom_permissions_replace_defaults():
     assert len(perms) == 1
     assert perms[0].scope == "memory"
     assert perms[0].permission.value == "read"
+
+
+def test_install_rejects_permissions_not_declared_in_registry():
+    user = make_user()
+    service = AppConnectionService(FakeSession(results=[[]]))
+
+    with pytest.raises(AppPermissionNotAllowedError):
+        asyncio.run(
+            service.install(
+                user,
+                "aura-core",
+                permissions=[
+                    ModulePermissionSpec(scope="brain", action="read"),
+                    ModulePermissionSpec(scope="memory", action="write"),
+                ],
+            )
+        )
 
 
 def test_get_connection_is_scoped_to_user():
@@ -191,6 +214,36 @@ def test_update_connection_toggles_active_and_replaces_permissions():
     updated = asyncio.run(service.update_connection(user, module.id, is_active=False))
     assert updated is module
     assert module.is_active is False
+
+
+def test_update_connection_rejects_unregistered_grants_without_mutating_connection():
+    user = make_user()
+    module = make_installed_module(user, slug="aura-core", name="AURA Core")
+    identity_permission = ModulePermission(
+        user_id=user.id,
+        installed_module_id=module.id,
+        scope="identity",
+        permission=PermissionAction.READ,
+    )
+    module.module_permissions = [identity_permission]
+    service = AppConnectionService(FakeSession(results=[[module]]))
+
+    with pytest.raises(AppPermissionNotAllowedError):
+        asyncio.run(
+            service.update_connection(
+                user,
+                module.id,
+                is_active=False,
+                permissions=[
+                    ModulePermissionSpec(scope="identity", action="read"),
+                    ModulePermissionSpec(scope="brain", action="read"),
+                    ModulePermissionSpec(scope="memory", action="write"),
+                ],
+            )
+        )
+
+    assert module.is_active is True
+    assert module.module_permissions == [identity_permission]
 
 
 def test_revoke_deletes_module_and_permissions():

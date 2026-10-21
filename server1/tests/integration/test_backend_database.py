@@ -447,6 +447,17 @@ def test_aura_core_brain_query_requires_its_own_connection_and_brain_read(client
     )
     assert denied_unconnected.status_code == 403
 
+    arbitrary_grant = client.post(
+        "/api/v1/apps/me",
+        json={
+            "module_slug": "aura-core",
+            "permissions": [{"scope": "memory", "action": "write"}],
+        },
+        headers=headers,
+    )
+    assert arbitrary_grant.status_code == 403
+    assert client.get("/api/v1/apps/me", headers=headers).json()["items"] == []
+
     connected_without_permission = client.post(
         "/api/v1/apps/me",
         json={
@@ -479,6 +490,29 @@ def test_aura_core_brain_query_requires_its_own_connection_and_brain_read(client
     assert {
         (permission["scope"], permission["action"])
         for permission in core_connection["permissions"]
+    } == {("identity", "read")}
+
+    unauthorized_update = client.patch(
+        f"/api/v1/apps/me/{core_connection['id']}",
+        json={
+            "is_active": False,
+            "permissions": [
+                {"scope": "identity", "action": "read"},
+                {"scope": "brain", "action": "read"},
+                {"scope": "memory", "action": "write"},
+            ],
+        },
+        headers=headers,
+    )
+    assert unauthorized_update.status_code == 403
+    still_unchanged = client.get(
+        f"/api/v1/apps/me/{core_connection['id']}", headers=headers
+    )
+    assert still_unchanged.status_code == 200
+    assert still_unchanged.json()["is_active"] is True
+    assert {
+        (permission["scope"], permission["action"])
+        for permission in still_unchanged.json()["permissions"]
     } == {("identity", "read")}
 
     granted = client.patch(

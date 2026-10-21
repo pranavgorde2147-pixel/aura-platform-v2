@@ -32,6 +32,10 @@ class AppAlreadyInstalledError(AppRegistryError):
     """The user already has this app installed/authorized."""
 
 
+class AppPermissionNotAllowedError(AppRegistryError):
+    """A requested permission is not declared for the app in the registry."""
+
+
 CATALOG: dict[str, AppDefinition] = {
     "aura-core": AppDefinition(
         slug="aura-core",
@@ -46,6 +50,7 @@ CATALOG: dict[str, AppDefinition] = {
         queries_brain=True,
         repo_path="server1/",
         default_permissions=[ModulePermissionSpec(scope="brain", action="read")],
+        additional_permissions=[ModulePermissionSpec(scope="identity", action="read")],
         # Chat is query-only; the app gets no memory-write or routed-record access.
         ingest_scope=None,
         routable=False,
@@ -587,6 +592,8 @@ class AppConnectionService:
         app = get_catalog_app(slug)
         if app is None:
             raise UnknownAppError(f"Unknown app slug: {slug}")
+        granted = permissions if permissions is not None else _default_permissions(app)
+        _validate_permissions(app, granted)
 
         existing = await self.session.execute(
             select(InstalledModule).where(
@@ -607,7 +614,6 @@ class AppConnectionService:
         self.session.add(module)
         await self.session.flush()
 
-        granted = permissions if permissions is not None else _default_permissions(app)
         await self._replace_permissions(user, module, granted)
         await self.session.commit()
         return module
@@ -623,6 +629,14 @@ class AppConnectionService:
         module = await self.get_connection(user, module_id)
         if module is None:
             return None
+
+        if permissions is not None:
+            app = get_catalog_app(module.module_slug)
+            if app is None:
+                raise AppPermissionNotAllowedError(
+                    f"Permissions cannot be updated for unregistered app: {module.module_slug}"
+                )
+            _validate_permissions(app, permissions)
 
         if is_active is not None:
             module.is_active = bool(is_active)
@@ -672,3 +686,17 @@ class AppConnectionService:
 
 def _default_permissions(app: AppDefinition) -> list[ModulePermissionSpec]:
     return list(app.default_permissions)
+
+
+def _validate_permissions(app: AppDefinition, permissions: list[ModulePermissionSpec]) -> None:
+    """Reject grants the app registry has not explicitly approved."""
+    allowed = {
+        (permission.scope, permission.action)
+        for permission in app.default_permissions + app.additional_permissions
+    }
+    for permission in permissions:
+        grant = (permission.scope, permission.action)
+        if grant not in allowed:
+            raise AppPermissionNotAllowedError(
+                f"Permission is not allowed for {app.slug}: {permission.scope}:{permission.action}"
+            )

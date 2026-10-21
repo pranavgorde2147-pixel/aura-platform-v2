@@ -62,6 +62,10 @@ class AppDefinition(BaseModel):
     ingests: bool = False
     repo_path: str | None = None
     default_permissions: list[ModulePermissionSpec] = Field(default_factory=list)
+    additional_permissions: list[ModulePermissionSpec] = Field(
+        default_factory=list,
+        description="Registry-approved grants that are not granted by default.",
+    )
     categories: list[str] = Field(default_factory=list)
     record_types: list[str] = Field(default_factory=list)
     routable: bool = False

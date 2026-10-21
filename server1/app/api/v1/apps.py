@@ -30,6 +30,7 @@ from app.services.app_ingestion import AppIngestionError, get_adapter
 from app.services.app_registry import (
     AppAlreadyInstalledError,
     AppConnectionService,
+    AppPermissionNotAllowedError,
     UnknownAppError,
     get_catalog_app,
     list_catalog,
@@ -74,6 +75,8 @@ async def connect_app(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except AppAlreadyInstalledError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except AppPermissionNotAllowedError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
     return _to_response(module)
 
 
@@ -101,12 +104,15 @@ async def update_connection(
 ) -> ConnectionResponse:
     """Update activation state and/or permissions for a connection."""
     service = AppConnectionService(session)
-    module = await service.update_connection(
-        current_user,
-        module_id,
-        is_active=payload.is_active,
-        permissions=payload.permissions,
-    )
+    try:
+        module = await service.update_connection(
+            current_user,
+            module_id,
+            is_active=payload.is_active,
+            permissions=payload.permissions,
+        )
+    except AppPermissionNotAllowedError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
     if module is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connection not found")
     return _to_response(module)
