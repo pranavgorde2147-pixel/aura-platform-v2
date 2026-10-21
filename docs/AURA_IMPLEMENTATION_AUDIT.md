@@ -64,12 +64,14 @@ Server 1 (`/api/v1`):
 - `auth` — login, refresh, logout, me (`app/api/v1/auth.py`).
 - `users` — registration, profile, lookup (`app/api/v1/users.py`).
 - `brain` — query, ingest, memory CRUD + search (`app/api/v1/brain.py`).
+- `processing` — universal understanding + routing pipeline: process, get,
+  confirm, retry, cancel (`app/api/v1/processing.py`).
 - `identity` — AI identity info (`app/api/v1/identity.py`).
 - `files` — proxy to Server 2 storage (`app/api/v1/files.py`).
 - `apps` — catalog + per-user connections (`app/api/v1/apps.py`).
 
 Server 2:
-- `/health`, `/v1/brain/infer` (`app/main.py`).
+- `/health`, `/v1/brain/infer`, `/v1/brain/analyze` (`app/main.py`).
 - `/v1/objects*`, `/v1/storage/health`, `/v1/storage/ready`
   (`app/api/objects.py`, `app/api/storage_health.py`).
 
@@ -241,10 +243,12 @@ Classification: **resolved**; mocks are unmistakable in responses.
 
 - Server 1: unit tests for auth/brain boundary, memory, config/CORS, models,
   files, brain client/fallback, infrastructure health, qdrant client/health,
-  storage client; integration tests boot Server 2 storage app + embedded PG
-  (`server1/tests/`, `tests/integration/`).
-- Server 2: storage object tests; model load skipped in CI.
-- Latest local run: Server 1 `86 passed`; Server 2 `39 passed, 2 skipped`.
+  storage client, and the Brain processing pipeline
+  (`server1/tests/test_brain_processing.py`); integration tests boot Server 2
+  storage app + embedded PG (`server1/tests/`, `tests/integration/`).
+- Server 2: storage object tests; analysis endpoint tests
+  (`server2/tests/test_brain_analysis.py`); model load skipped in CI.
+- Latest local run: Server 1 `175 passed`; Server 2 `46 passed, 2 skipped`.
 
 Gaps: no tests for session lifecycle/refresh rotation (feature missing), no tests
 for embeddings/vector search (feature missing), no test asserting a Server-2
@@ -384,3 +388,78 @@ Nothing depends on items 4–7 (verified by import/search); they were removed an
 the test suites re-run. `.env.example` files were preserved. No secrets were read
 or modified. Historical Server 3 documents were left intact because they are
 records, not runtime references.
+
+---
+
+## 19. Universal Brain processing pipeline (post-audit)
+
+Implemented as a shared layer above the per-app ingestion adapters. Full
+contract: `docs/AURA_BRAIN_PROCESSING.md`.
+
+### Understanding (Server 2)
+
+- `POST /v1/brain/analyze` (`server2/app/analysis.py`, `app/main.py`): splits an
+  input into independently meaningful segments, labels each with a category and
+  a record type, extracts entities/summary/rationale, and returns a confidence
+  with an explicit `confidence_kind` (`model` vs `heuristic`).
+- Modes: `llm` (model-labelled) and `deterministic` (dependency-free
+  structural analyser). The deterministic path is also the fallback when the
+  model is unavailable, so the endpoint never fails a request for lack of a
+  model.
+- Internal bearer token required; sensitive context keys are stripped, as for
+  `/v1/brain/infer`.
+
+Classification: **implemented**.
+
+### Policy, routing and authorization (Server 1)
+
+- `app/services/classification_policy.py`: risk tiers per category, per-tier
+  confidence thresholds, `unclassified` never auto-delivered, consent rules and
+  credential-like content detection.
+- `app/services/destination_resolver.py`: destinations come from the application
+  registry (`categories`, `record_types`, `routable`, `storage_adapter`), never
+  from the raw text. A category that the destination does not declare exactly
+  falls back to the closest declared record type and reports
+  `exact_match: false`.
+- Authorization uses the real connection and permission state: a missing or
+  inactive connection, or a missing `write_scope:write_action` grant, produces
+  an `awaiting_authorization` operation with a machine-readable reason — never
+  a silent skip and never an implicit grant.
+
+Classification: **implemented**.
+
+### Delivery, memory and lifecycle (Server 1)
+
+- `app/services/storage_adapters.py`: `relational` (the `app_records` table)
+  and `object` (the object storage service plus an `app_records` pointer)
+  adapters behind one interface, with a `dedupe_key` that makes a repeated
+  delivery resolve to the same record.
+- `app/services/brain_router.py`: process → plan → authorize → deliver →
+  remember → status, with idempotent replay, per-operation retry and cancel.
+- Memory separation: full content lives in `app_records`; `brain_memories`
+  keeps a bounded summary, and only for `personal_fact` / `user_preference`
+  items, only with an explicit opt-in, and never for credential-like content.
+  The legacy ingestion path was changed to follow the same rule (`record_id` was
+  added to the ingest responses; `memory_id` is unchanged).
+- New API: `POST /api/v1/brain/process`, `GET /api/v1/brain/process/{id}`,
+  and `.../confirm`, `.../retry`, `.../cancel`.
+
+Classification: **implemented**.
+
+### Persistence
+
+- New tables `brain_processing_runs` and `brain_processing_operations`, plus
+  `app_records`; `brain_memories` gained `retention_policy` and `expires_at`.
+- Migration `c4e8f1a2b7d9_add_brain_processing_pipeline.py` (revises
+  `b7d4e1a9c2f3`), exercised by the embedded-Postgres integration test.
+
+### Honest degradation
+
+When the understanding service cannot be reached, the item is reported as a
+single `unclassified` segment with confidence `0.0`, `degraded: true` and a
+review-required run. The pipeline never guesses and never reports an
+uncalibrated score as a calibrated one.
+
+Classification: **implemented**; remaining work is client-side (the apps and
+the review UI) and production verification of the deployment (Phase J).
+

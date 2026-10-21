@@ -56,6 +56,21 @@ STORAGE_DATABASE_URL=sqlite+aiosqlite:///./data/storage.db
 STORAGE_API_TOKEN=<same as Server 1 STORAGE_API_TOKEN>
 ```
 
+`INTERNAL_API_TOKEN` is the application-layer shared secret. Generate it once
+with a secure secret manager or password generator, then configure the exact
+same value separately in Server 2's local `server2/.env` (or its process
+environment) and Server 1's Render environment. Server 2 process environment
+variables override `server2/.env`; Server 1 process environment variables
+override `server1/.env`. The two files and Render secret fields are independent
+sources and do not synchronize values automatically. Do not put the value in
+this repository, a client app, command-line arguments, or logs.
+
+`STORAGE_API_TOKEN` can be a separate shared secret if Server 1's
+`STORAGE_API_TOKEN` and Server 2's `STORAGE_API_TOKEN` are configured with the
+same value. If both are omitted, each service falls back to `INTERNAL_API_TOKEN`.
+Changing either shared secret is an operational rotation: update both service
+configurations together and restart/redeploy both services.
+
 Start it:
 
 ```bash
@@ -118,6 +133,12 @@ AI_SERVER_MODEL=Qwen3.5-0.8B
 AI_ACCESS_CLIENT_ID=<cloudflare access client id>
 AI_ACCESS_CLIENT_SECRET=<cloudflare access client secret>
 ```
+
+In the Render dashboard, set Server 1's `INTERNAL_API_TOKEN` to exactly the
+value configured for the laptop-hosted Server 2. Render's `sync: false` entries
+are independent; entering a value for one service does not populate the other.
+The Cloudflare Access service token is an additional edge credential, not a
+replacement for the matching `INTERNAL_API_TOKEN`.
 
 ### 4. Keep the laptop alive
 
@@ -187,6 +208,29 @@ Server 2 in the cloud runs in external-provider mode
    Its start command runs `alembic upgrade head` before booting.
 5. Verify: `GET https://<server1>/api/v1/health` returns `status: healthy` with
    `ai_server` and `storage_server` connected.
+
+### Schema provisioning and first-user check
+
+Registration and login require the database schema to exist. The container
+command runs `alembic upgrade head` before `uvicorn` (also wired through
+`render.yaml`'s `dockerCommand`); the Alembic URL is normalised to the
+installed psycopg v3 driver, so a bare `postgresql://` URL from Neon/Render
+works. Two operational consequences:
+
+- `GET /api/v1/health` only reports `database: connected` when the core tables
+  (`users`, `ai_identities`, `personal_ai_brains`, `sessions`,
+  `brain_memories`) are present. A reachable but unmigrated database now
+  reports `disconnected` and `/api/v1/ready` returns 503 instead of silently
+  serving 500s.
+- If a deploy ever regresses to "health green but registration 500", run
+  `alembic upgrade head` against `POSTGRES_URL` (or `alembic current` to check)
+  before changing application code.
+
+`AI_SERVER_MODEL` must equal the model Server 2 reports in its `/health`
+(`Qwen3.5-0.8B` for local GGUF). A mismatch makes every inference request fail
+with HTTP 400 while Server 1 still returns 200 with a degraded answer. The
+Server 1 health payload now flags this as `services.ai_server.model_match:
+false` with the `configured_model`; fix the secret and redeploy.
 
 For a single VM use Docker:
 

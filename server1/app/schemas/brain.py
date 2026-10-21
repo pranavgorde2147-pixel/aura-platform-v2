@@ -72,6 +72,8 @@ class BrainIngestResponse(BaseModel):
     stored: bool = True
     memory_id: uuid.UUID | None = None
     vault_entry_id: uuid.UUID | None = None
+    # The application record that holds the full ingested content.
+    record_id: uuid.UUID | None = None
 
 
 class MemoryCreateRequest(BaseModel):

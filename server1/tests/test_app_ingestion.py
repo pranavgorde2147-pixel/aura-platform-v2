@@ -6,7 +6,7 @@ import asyncio
 import json
 import uuid
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -112,8 +112,9 @@ def make_user(email: str = "ingest@example.com") -> SimpleNamespace:
 
 
 def build_service(identity) -> PersonalBrainService:
+    session = SimpleNamespace(add=Mock(), flush=AsyncMock())
     service = PersonalBrainService(
-        SimpleNamespace(), llm_provider=MockPersonalBrainLLMProvider()
+        session, llm_provider=MockPersonalBrainLLMProvider()
     )
     service.identity_repo = SimpleNamespace(
         get_by_user_id=AsyncMock(return_value=identity)
@@ -121,6 +122,9 @@ def build_service(identity) -> PersonalBrainService:
     service.brain_memory_repo = SimpleNamespace(
         create=AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4())),
         commit=AsyncMock(),
+    )
+    service.app_record_repo = SimpleNamespace(
+        find_by_dedupe=AsyncMock(return_value=None),
     )
     service.memory_repo = SimpleNamespace(
         upsert_for_identity=AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4()))
@@ -161,6 +165,37 @@ def test_record_ingestion_persists_memory_vault_and_timeline():
         service.knowledge_repo.record_nodes.assert_awaited_once()
         service.timeline_repo.create.assert_awaited_once()
         service.timeline_repo.commit.assert_awaited_once()
+
+    asyncio.run(_run())
+
+
+def test_record_ingestion_keeps_full_content_out_of_brain_memory():
+    """The full content belongs to application storage, memory keeps a summary."""
+    async def _run():
+        user = make_user()
+        service = build_service(SimpleNamespace(id=uuid.uuid4()))
+        adapter = get_adapter("study")
+        result = await service.ingest_app_event(
+            user,
+            adapter,
+            {
+                "title": "DBMS Normalization",
+                "notes": "1NF, 2NF, 3NF details",
+                "subject": "Databases",
+                "external_id": "lecture-1",
+            },
+        )
+
+        assert result["accepted"] is True
+        assert result["record_id"]
+
+        stored_record = service.session.add.call_args.args[0]
+        assert stored_record.destination_app == "study"
+        assert "1NF, 2NF, 3NF details" in stored_record.content
+
+        memory_kwargs = service.brain_memory_repo.create.await_args.kwargs
+        assert memory_kwargs["content"] != stored_record.content
+        assert len(memory_kwargs["content"]) <= 1000
 
     asyncio.run(_run())
 

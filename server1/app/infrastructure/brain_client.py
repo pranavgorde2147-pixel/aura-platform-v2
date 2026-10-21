@@ -92,34 +92,17 @@ class BrainClient:
         if self.retry_backoff > 0:
             await asyncio.sleep(self.retry_backoff * attempt)
 
-    async def infer(
+    async def _post_json(
         self,
-        user_id: str,
-        query: str,
-        context: dict[str, Any],
-        request_id: str | None = None,
-        model: str | None = None,
+        url: str,
+        payload: dict[str, Any],
+        headers: dict[str, str],
     ) -> dict[str, Any]:
-        """Send an inference request to the Server 2 Brain service.
+        """POST JSON with bounded retries and safe error translation.
 
-        Raises :class:`BrainServiceError` on any failure. The caller (the brain
-        provider) decides whether to fall back to an external provider.
+        Shared by the inference and analysis calls so both behave identically
+        with respect to timeouts, retries and credential-safe errors.
         """
-        if request_id is None:
-            request_id = str(uuid.uuid4())
-        if model is None:
-            model = self.model
-
-        payload = {
-            "user_id": user_id,
-            "query": query,
-            "model": model,
-            "request_id": request_id,
-            "context": context,
-        }
-        headers = self._headers(user_id, request_id)
-        url = f"{self.base_url}/v1/brain/infer"
-
         attempt = 0
         while True:
             attempt += 1
@@ -185,7 +168,7 @@ class BrainClient:
             if response.status_code >= 400:
                 # Never log or forward the response body: it may contain
                 # internal implementation details.
-                logger.error("Server 2 rejected inference with HTTP %s", response.status_code)
+                logger.error("Server 2 rejected the request with HTTP %s", response.status_code)
                 if response.status_code in (401, 403):
                     raise BrainServiceError(
                         "brain_auth_failed",
@@ -206,6 +189,74 @@ class BrainClient:
                     "brain_invalid_response",
                     "AURA Brain returned an invalid response",
                 ) from exc
+
+    async def infer(
+        self,
+        user_id: str,
+        query: str,
+        context: dict[str, Any],
+        request_id: str | None = None,
+        model: str | None = None,
+    ) -> dict[str, Any]:
+        """Send an inference request to the Server 2 Brain service.
+
+        Raises :class:`BrainServiceError` on any failure. The caller (the brain
+        provider) decides whether to fall back to an external provider.
+        """
+        if request_id is None:
+            request_id = str(uuid.uuid4())
+        if model is None:
+            model = self.model
+
+        payload = {
+            "user_id": user_id,
+            "query": query,
+            "model": model,
+            "request_id": request_id,
+            "context": context,
+        }
+        headers = self._headers(user_id, request_id)
+        url = f"{self.base_url}/v1/brain/infer"
+        return await self._post_json(url, payload, headers)
+
+    async def analyze(
+        self,
+        *,
+        user_id: str,
+        content: str,
+        context: dict[str, Any] | None = None,
+        source_app: str | None = None,
+        language: str | None = None,
+        request_id: str | None = None,
+        model: str | None = None,
+        max_segments: int = 12,
+    ) -> dict[str, Any]:
+        """Ask Server 2 for a structured understanding of one input.
+
+        Returns the decoded analysis envelope. Raises :class:`BrainServiceError`
+        when the service is unreachable or rejects the request.
+        """
+        if request_id is None:
+            request_id = str(uuid.uuid4())
+        if model is None:
+            model = self.model
+
+        payload: dict[str, Any] = {
+            "user_id": user_id,
+            "content": content,
+            "model": model,
+            "request_id": request_id,
+            "context": context or {},
+            "max_segments": max_segments,
+        }
+        if source_app is not None:
+            payload["source_app"] = source_app
+        if language is not None:
+            payload["language"] = language
+
+        headers = self._headers(user_id, request_id)
+        url = f"{self.base_url}/v1/brain/analyze"
+        return await self._post_json(url, payload, headers)
 
     async def health_check(self) -> dict[str, Any] | None:
         """Check Server 2 health status. Returns ``None`` when unreachable."""

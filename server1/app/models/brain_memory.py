@@ -8,10 +8,11 @@ conversations are not saved automatically.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Enum as SQLAlchemyEnum, ForeignKey, Integer, String, Text
+from sqlalchemy import DateTime, Enum as SQLAlchemyEnum, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -65,5 +66,13 @@ class BrainMemory(BaseModel):
     source_app: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     importance: Mapped[int] = mapped_column(Integer, default=0, nullable=False, index=True)
     embedding_status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False, index=True)
+    # Retention: ``None`` means "keep until the user deletes it". A concrete
+    # timestamp is set when the configured retention policy applies an expiry.
+    retention_policy: Mapped[str] = mapped_column(
+        String(64), default="default", nullable=False, index=True
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
 
     ai_identity: Mapped["AIIdentity"] = relationship(lazy="selectin")

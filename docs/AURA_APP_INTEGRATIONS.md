@@ -103,3 +103,23 @@ Add an app by defining an `AppAdapter` in
 and ensuring a catalog entry grants that scope/action by default. Add a
 normalizer for the app's documented `sends_to_aura` payload; do not invent fields
 beyond the spec.
+
+## Preferred path: the universal Brain pipeline
+
+`POST /api/v1/brain/process` supersedes the per-app adapters for new
+integrations. The app submits raw content plus its own `source_app`; the Brain
+understands it, resolves the destinations from the registry, authorizes them
+against the user's connections and permissions, delivers what is allowed, and
+parks the rest for review. The app never decides where content belongs and
+never needs a new adapter for a new category.
+
+Contract, thresholds, response shape and client examples:
+`docs/AURA_BRAIN_PROCESSING.md`. The per-app adapters above remain supported
+for the already-connected clients and for app-specific pre-processing.
+
+To onboard an application to the pipeline, declare its capabilities in the
+catalog entry — `categories`, `record_types`, `routable`, `storage_adapter`,
+`ingest_scope`/`ingest_action` and `write_scope`/`write_action` — and make sure
+the default permissions grant the write scope. The user still has to connect
+the app before the Brain may deliver to it.
+

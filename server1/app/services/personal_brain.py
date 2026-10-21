@@ -14,6 +14,7 @@ from app.models.brain_memory import BrainMemory, MemoryKind, MemorySource
 from app.models.personal_ai_brain import PersonalAIBrain
 from app.models.user import User
 from app.repositories.ai_identity import AIIdentityRepository
+from app.repositories.app_record import AppRecordRepository
 from app.repositories.brain_memory import BrainMemoryRepository
 from app.repositories.knowledge_graph import KnowledgeGraphRepository
 from app.repositories.memory_vault import MemoryVaultRepository
@@ -30,8 +31,25 @@ from app.services.brain_provider import (
 )
 from app.services.memory_index import MemoryIndexer, NoOpMemoryIndexer, get_memory_indexer
 from app.services.real_brain_provider import RealPersonalBrainLLMProvider
+from app.services.storage_adapters import (
+    RecordPayload,
+    build_dedupe_key,
+    build_record_store,
+)
 
 logger = get_logger(__name__)
+
+#: Maximum number of characters of an ingested item that Brain memory keeps.
+#: The complete content lives in the application record store.
+MEMORY_CONTENT_LIMIT = 1000
+
+
+def _bounded_memory_content(normalized: NormalizedIngestion) -> str:
+    """Return the bounded text that may be stored in Brain memory."""
+    text = normalized.summary or normalized.content or ""
+    if len(text) <= MEMORY_CONTENT_LIMIT:
+        return text
+    return text[:MEMORY_CONTENT_LIMIT].rstrip()
 
 
 class PersonalBrainService:
@@ -53,6 +71,7 @@ class PersonalBrainService:
         self.knowledge_repo = KnowledgeGraphRepository(session)
         self.timeline_repo = TimelineRepository(session)
         self.brain_memory_repo = BrainMemoryRepository(session)
+        self.app_record_repo = AppRecordRepository(session)
 
         # Semantic retrieval is optional; a no-op indexer keeps keyword search
         # working when Qdrant or embeddings are unavailable.
@@ -370,10 +389,29 @@ class PersonalBrainService:
                 }
 
         memory = None
+        record_id: str | None = None
+        partial = False
         if normalized.persist_memory:
+            # The full content belongs to the *application* storage, not to
+            # Brain memory. Brain keeps only a bounded summary so it can be
+            # used for future reasoning without duplicating the user's
+            # original content.
+            try:
+                record_id = await self._store_application_record(
+                    user,
+                    normalized=normalized,
+                    source_app=source_app,
+                )
+            except Exception as exc:  # noqa: BLE001 - the memory must survive
+                partial = True
+                logger.warning(
+                    "Could not store the application record for app %s: %s",
+                    source_app,
+                    type(exc).__name__,
+                )
             memory = await self.store_memory_for_user(
                 user,
-                content=normalized.content,
+                content=_bounded_memory_content(normalized),
                 kind=normalized.kind,
                 summary=normalized.summary,
                 source_app=source_app,
@@ -382,7 +420,6 @@ class PersonalBrainService:
             )
 
         vault_entry = None
-        partial = False
         try:
             if normalized.vault and normalized.vault.get("object_reference"):
                 vault_entry = await self.memory_repo.upsert_for_identity(
@@ -429,7 +466,54 @@ class PersonalBrainService:
             "event_type": normalized.event_type,
             "memory_id": str(memory.id) if memory else None,
             "vault_entry_id": str(vault_entry.id) if vault_entry else None,
+            "record_id": record_id,
         }
+
+    async def _store_application_record(
+        self,
+        user: User,
+        *,
+        normalized: NormalizedIngestion,
+        source_app: str | None,
+    ) -> str | None:
+        """Store the full ingested content in the application record store.
+
+        Application storage keeps the complete content of an ingested item
+        (lecture notes, meeting transcripts, diary entries). Brain memory only
+        ever receives a bounded summary of it.
+        """
+        destination = source_app or "brain"
+        record_type = normalized.resource_type or "record"
+        content = normalized.content or ""
+        dedupe_key = build_dedupe_key(
+            user_id=user.id,
+            destination_app=destination,
+            record_type=record_type,
+            run_id=None,
+            segment_index=None,
+            content=content,
+        )
+        if normalized.dedupe_key:
+            dedupe_key = f"{destination}:{record_type}:{normalized.dedupe_key}"
+        store = build_record_store(self.session, "relational", self.app_record_repo)
+        stored = await store.write(
+            RecordPayload(
+                user_id=user.id,
+                destination_app=destination,
+                record_type=record_type,
+                content=content,
+                dedupe_key=dedupe_key,
+                title=normalized.summary,
+                summary=normalized.summary,
+                source_reference=(
+                    (normalized.vault or {}).get("object_reference")
+                    if normalized.vault
+                    else None
+                ),
+                retention_policy="default",
+            )
+        )
+        return str(stored.record_id)
 
     async def ingest_app_event(
         self,
@@ -480,6 +564,7 @@ class PersonalBrainService:
             "stored": result["accepted"],
             "memory_id": result.get("memory_id"),
             "vault_entry_id": result.get("vault_entry_id"),
+            "record_id": result.get("record_id"),
         }
 
     async def get_brain_context(self, ai_identity_id: uuid.UUID) -> dict:

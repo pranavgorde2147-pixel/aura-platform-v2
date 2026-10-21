@@ -12,7 +12,9 @@ from app.infrastructure.database.session import to_sync_url
 # Import all ORM models so their tables are registered on the shared metadata.
 from app.models import (
     ai_identity,
+    app_record,
     brain_memory,
+    brain_processing,
     device,
     installed_module,
     knowledge_graph,

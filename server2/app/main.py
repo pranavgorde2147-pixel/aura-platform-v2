@@ -12,6 +12,11 @@ from typing import Any
 import torch
 from fastapi import FastAPI, Header, HTTPException, Request
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from app.analysis import (
+    build_analysis_prompt,
+    deterministic_analysis,
+    parse_analysis_response,
+)
 from app.external_proxy import call_external_model
 from app.api.objects import router as objects_router
 from app.api.storage_health import router as storage_health_router
@@ -446,16 +451,23 @@ def _generate_test_response() -> str:
     return "This is a test-mode response generated without loading the local Qwen3.5 checkpoint."
 
 
-@app.post("/v1/brain/infer")
-async def brain_infer(request: Request, authorization: str | None = Header(default=None, alias="Authorization")) -> dict[str, Any]:
+def _require_internal_token(authorization: str | None) -> None:
+    """Validate the shared internal bearer token.
+
+    Constant-time comparison avoids leaking the token length/prefix via timing.
+    """
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
 
     token = authorization.split(" ", 1)[1].strip()
     expected_token = _internal_api_token()
-    # Constant-time comparison avoids leaking the token length/prefix via timing.
     if not expected_token or not hmac.compare_digest(token, expected_token):
         raise HTTPException(status_code=401, detail="Invalid internal API token")
+
+
+@app.post("/v1/brain/infer")
+async def brain_infer(request: Request, authorization: str | None = Header(default=None, alias="Authorization")) -> dict[str, Any]:
+    _require_internal_token(authorization)
 
     payload = await request.json()
     user_id = payload.get("user_id")
@@ -585,3 +597,209 @@ async def brain_infer(request: Request, authorization: str | None = Header(defau
         "tokens_used": int(generated_tokens),
         "latency_ms": latency_ms,
     }
+
+
+# ---------------------------------------------------------------------------
+# Structured analysis
+# ---------------------------------------------------------------------------
+
+
+def _complete_text(runtime: Any, system: str, user: str, *, max_new_tokens: int) -> str:
+    """Run one completion against whichever runtime is loaded."""
+    if isinstance(runtime, GGUFRuntime):
+        return runtime.generate(
+            system,
+            user,
+            max_new_tokens=max_new_tokens,
+            temperature=float(os.getenv("TEMPERATURE", "0.2")),
+            top_p=float(os.getenv("TOP_P", "0.8")),
+        )
+    prompt = f"{system}\n\n{user}"
+    inputs = runtime.tokenizer(prompt, return_tensors="pt")
+    inputs = {k: v.to(runtime.device) for k, v in inputs.items()}
+    with torch.inference_mode():
+        generated = runtime.model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            temperature=float(os.getenv("TEMPERATURE", "0.2")),
+            top_p=float(os.getenv("TOP_P", "0.8")),
+            pad_token_id=runtime.tokenizer.eos_token_id,
+            eos_token_id=runtime.tokenizer.eos_token_id,
+        )
+    input_tokens = inputs["input_ids"].shape[1]
+    decoded = runtime.tokenizer.decode(
+        generated[0][input_tokens:],
+        skip_special_tokens=True,
+    )
+    return decoded.strip()
+
+
+def _analysis_response(
+    *,
+    user_id: str,
+    request_id: str,
+    provider: str,
+    model: str,
+    segments: list[dict[str, Any]],
+    analysis_mode: str,
+    latency_ms: int,
+    degraded_reason: str | None = None,
+    attempted_provider: str | None = None,
+) -> dict[str, Any]:
+    """Build the analysis response envelope.
+
+    ``provider`` always names the producer of the returned labels. When the
+    model was tried and its answer could not be used, the labels come from the
+    deterministic analyser, so the provider is ``"deterministic"`` and the
+    attempted provider is reported separately.
+    """
+    return {
+        "model": model,
+        "provider": provider,
+        "attempted_provider": attempted_provider,
+        "analysis_mode": analysis_mode,
+        "confidence_kind": "model" if analysis_mode == "llm" else "heuristic",
+        "request_id": request_id,
+        "user_id": user_id,
+        "status": "ok",
+        "segments": segments,
+        "language": None,
+        "latency_ms": latency_ms,
+        "degraded": degraded_reason is not None,
+        "degraded_reason": degraded_reason,
+    }
+
+
+@app.post("/v1/brain/analyze")
+async def brain_analyze(request: Request, authorization: str | None = Header(default=None, alias="Authorization")) -> dict[str, Any]:
+    """Return a structured understanding of one input.
+
+    The response splits the input into independently meaningful segments and
+    labels each with a category, a record type and a confidence value. Routing
+    and delivery are *not* performed here: Server 1 resolves destinations
+    through the application registry and the permission system.
+
+    When the model is unavailable, when the model output cannot be parsed, or
+    in test mode, the deterministic analyser is used and the response is
+    explicitly labelled ``analysis_mode="deterministic"`` with
+    ``confidence_kind="heuristic"`` so the caller never mistakes a heuristic
+    score for a calibrated one.
+    """
+    _require_internal_token(authorization)
+
+    payload = await request.json()
+    user_id = payload.get("user_id")
+    content = payload.get("content")
+    model_name = payload.get("model")
+    request_id = payload.get("request_id")
+    source_app = payload.get("source_app")
+    language = payload.get("language")
+    context = payload.get("context") or {}
+    max_segments = payload.get("max_segments") or 12
+
+    if not _is_valid_uuid(user_id):
+        raise HTTPException(status_code=400, detail="user_id must be a valid UUID")
+    if not isinstance(content, str) or not content.strip():
+        raise HTTPException(status_code=400, detail="content must be a non-empty string")
+    if not isinstance(context, dict):
+        raise HTTPException(status_code=400, detail="context must be an object")
+    if request_id is not None and not _is_valid_uuid(request_id):
+        raise HTTPException(status_code=400, detail="request_id must be a valid UUID when supplied")
+    try:
+        max_segments = max(1, min(int(max_segments), 32))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="max_segments must be an integer")
+
+    if model_name is not None and model_name != _model_name():
+        raise HTTPException(status_code=400, detail=f"model must be exactly {_model_name()}")
+    model_name = _model_name()
+    resolved_request_id = str(request_id) if request_id is not None else str(uuid.uuid4())
+
+    system, user = build_analysis_prompt(
+        content,
+        source_app=source_app,
+        language=language,
+        context=context,
+    )
+
+    # Test mode without an external provider: the deterministic analyser is the
+    # only implementation available, and the response says so.
+    if _skip_model_load() and not (_external_api_key() and _external_api_url()):
+        start = time.perf_counter()
+        segments = deterministic_analysis(content, source_app=source_app, max_segments=max_segments)
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        response = _analysis_response(
+            user_id=str(user_id),
+            request_id=resolved_request_id,
+            provider="test",
+            model=model_name,
+            segments=segments,
+            analysis_mode="deterministic",
+            latency_ms=latency_ms,
+            degraded_reason="model_load_skipped",
+        )
+        response["language"] = language
+        return response
+
+    start = time.perf_counter()
+    raw_text: str | None = None
+    provider = "local"
+    if _skip_model_load():
+        # External hosted provider configured: route the analysis prompt to it.
+        provider = "external"
+        try:
+            raw_text = call_external_model(f"{system}\n\n{user}")
+        except Exception:
+            raw_text = None
+    else:
+        try:
+            runtime = _get_runtime()
+        except Exception:
+            runtime = None
+        if runtime is not None and runtime.ready and runtime.model is not None:
+            provider = getattr(runtime, "provider", "local")
+            try:
+                raw_text = _complete_text(
+                    runtime,
+                    system,
+                    user,
+                    max_new_tokens=int(os.getenv("ANALYSIS_MAX_NEW_TOKENS", "512")),
+                )
+            except Exception:
+                raw_text = None
+
+    segments = parse_analysis_response(raw_text) if raw_text else None
+    latency_ms = int((time.perf_counter() - start) * 1000)
+
+    if segments:
+        response = _analysis_response(
+            user_id=str(user_id),
+            request_id=resolved_request_id,
+            provider=provider,
+            model=model_name,
+            segments=segments,
+            analysis_mode="llm",
+            latency_ms=latency_ms,
+        )
+        response["language"] = language
+        return response
+
+    # The model could not produce a usable structured answer: fall back to the
+    # deterministic analyser and mark the response as degraded. The provider
+    # names the producer of the labels; the attempted provider is reported
+    # separately so a heuristic answer is never presented as a model answer.
+    fallback = deterministic_analysis(content, source_app=source_app, max_segments=max_segments)
+    response = _analysis_response(
+        user_id=str(user_id),
+        request_id=resolved_request_id,
+        provider="deterministic",
+        model=model_name,
+        segments=fallback,
+        analysis_mode="deterministic",
+        latency_ms=latency_ms,
+        degraded_reason="llm_output_unusable",
+        attempted_provider=provider,
+    )
+    response["language"] = language
+    return response

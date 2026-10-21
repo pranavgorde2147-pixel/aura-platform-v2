@@ -13,6 +13,8 @@ import shutil
 import tempfile
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -186,7 +188,9 @@ def test_app_registry_connection_lifecycle(client):
     body = install.json()
     assert body["module_slug"] == "meeting"
     assert body["is_active"] is True
-    assert len(body["permissions"]) == 3
+    granted = {(permission["scope"], permission["action"]) for permission in body["permissions"]}
+    assert ("brain", "read") in granted
+    assert ("meeting", "write") in granted
     module_id = body["id"]
 
     listing = client.get("/api/v1/apps/me", headers=headers)
@@ -418,6 +422,76 @@ def test_core_apps_are_registered_with_brain_read(client):
 
 
 @pytest.mark.integration
+def test_aura_core_brain_query_requires_its_own_connection_and_brain_read(client):
+    email = f"aura-core-{uuid.uuid4().hex[:8]}@example.com"
+    _register(client, email)
+    headers = {"Authorization": f"Bearer {_login(client, email)['access_token']}"}
+
+    catalog = client.get("/api/v1/apps").json()
+    aura_core_entries = [entry for entry in catalog if entry["slug"] == "aura-core"]
+    assert len(aura_core_entries) == 1
+    aura_core = aura_core_entries[0]
+    assert aura_core["name"] == "AURA Core"
+    assert aura_core["client_type"] == "mobile"
+    assert aura_core["queries_brain"] is True
+    assert {(p["scope"], p["action"]) for p in aura_core["default_permissions"]} == {
+        ("brain", "read")
+    }
+
+    # Registration in the catalog does not create a per-user connection.
+    assert client.get("/api/v1/apps/me", headers=headers).json()["items"] == []
+    denied_unconnected = client.post(
+        "/api/v1/brain/query",
+        json={"query": "hello", "source_app": "aura-core"},
+        headers=headers,
+    )
+    assert denied_unconnected.status_code == 403
+
+    connected_without_permission = client.post(
+        "/api/v1/apps/me",
+        json={
+            "module_slug": "aura-core",
+            "permissions": [{"scope": "identity", "action": "read"}],
+        },
+        headers=headers,
+    )
+    assert connected_without_permission.status_code == 201
+    denied_missing_permission = client.post(
+        "/api/v1/brain/query",
+        json={"query": "hello", "source_app": "aura-core"},
+        headers=headers,
+    )
+    assert denied_missing_permission.status_code == 403
+
+    connection_id = connected_without_permission.json()["id"]
+    granted = client.patch(
+        f"/api/v1/apps/me/{connection_id}",
+        json={"permissions": [{"scope": "brain", "action": "read"}]},
+        headers=headers,
+    )
+    assert granted.status_code == 200, granted.text
+    assert {(p["scope"], p["action"]) for p in granted.json()["permissions"]} == {
+        ("brain", "read")
+    }
+
+    # The query succeeds only once the same user's connection grants brain:read.
+    result = client.post(
+        "/api/v1/brain/query",
+        json={"query": "hello from AURA Core", "source_app": "aura-core"},
+        headers=headers,
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["answer"]
+
+    connections = client.get("/api/v1/apps/me", headers=headers).json()["items"]
+    core_connection = next(item for item in connections if item["module_slug"] == "aura-core")
+    assert any(
+        permission["scope"] == "brain" and permission["action"] == "read"
+        for permission in core_connection["permissions"]
+    )
+
+
+@pytest.mark.integration
 def test_catalog_registration_is_idempotent(client):
     """Repeated catalog reads are stable: no duplicates, stable ordering."""
     first = client.get("/api/v1/apps").json()
@@ -445,7 +519,7 @@ def test_brain_query_authorized_after_connecting_core_apps(client):
     )
     assert denied.status_code == 403, denied.text
 
-    for slug in ("study", "meeting", "diary", "travel", "health"):
+    for slug in ("aura-core", "study", "meeting", "diary", "travel", "health"):
         connect = client.post("/api/v1/apps/me", json={"module_slug": slug}, headers=headers)
         assert connect.status_code == 201, connect.text
 
@@ -555,3 +629,171 @@ def test_core_apps_ingest_after_connection(client):
             assert body["memory_id"] is None
         else:
             assert body["memory_id"]
+
+
+# ------------------------------------------- universal brain processing
+
+def _fake_analysis_envelope(category: str, record_type: str, text: str, confidence: float) -> dict:
+    """A Server 2 analysis response used to keep the test hermetic."""
+    return {
+        "analysis_mode": "llm",
+        "confidence_kind": "model",
+        "provider": "test",
+        "status": "ok",
+        "language": None,
+        "latency_ms": 3,
+        "degraded": False,
+        "degraded_reason": None,
+        "request_id": str(uuid.uuid4()),
+        "user_id": str(uuid.uuid4()),
+        "segments": [
+            {
+                "index": 0,
+                "category": category,
+                "record_type": record_type,
+                "text": text,
+                "summary": text[:200],
+                "entities": [],
+                "occurred_at": None,
+                "confidence": confidence,
+                "rationale": "integration fixture",
+            }
+        ],
+    }
+
+
+@pytest.mark.integration
+def test_brain_process_routes_to_an_authorized_destination(client, monkeypatch, database):
+    email = f"process-{uuid.uuid4().hex[:8]}@example.com"
+    _register(client, email)
+    headers = {"Authorization": f"Bearer {_login(client, email)['access_token']}"}
+
+    connect = client.post("/api/v1/apps/me", json={"module_slug": "study"}, headers=headers)
+    assert connect.status_code == 201, connect.text
+
+    envelope = _fake_analysis_envelope(
+        "lecture", "lecture_note", "Lecture on normalisation", 0.93
+    )
+    fake_client = SimpleNamespace(analyze=AsyncMock(return_value=envelope))
+    monkeypatch.setattr(
+        "app.services.content_analysis.get_brain_client", lambda: fake_client
+    )
+
+    response = client.post(
+        "/api/v1/brain/process",
+        json={
+            "content": "Lecture on normalisation",
+            "source_app": "study",
+            "input_id": "lecture-1",
+        },
+        headers=headers,
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+
+    assert body["status"] == "delivered"
+    assert body["review_required"] is False
+    assert body["classification"]["analysis_mode"] == "llm"
+    assert body["classification"]["confidence_kind"] == "model"
+    assert body["classification"]["categories"] == ["lecture"]
+    assert body["items"][0]["destination_app"] == "study"
+    assert body["items"][0]["status"] == "delivered"
+    assert body["delivery"][0]["status"] == "delivered"
+    assert body["record_references"]
+
+    # The full content is stored as an application record, not as a memory.
+    import psycopg
+
+    with psycopg.connect(database) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*) FROM app_records WHERE destination_app = 'study'"
+            )
+            stored = cursor.fetchone()[0]
+    assert stored >= 1
+
+
+@pytest.mark.integration
+def test_brain_process_is_idempotent_per_user(client, monkeypatch):
+    email = f"idem-{uuid.uuid4().hex[:8]}@example.com"
+    _register(client, email)
+    headers = {"Authorization": f"Bearer {_login(client, email)['access_token']}"}
+    client.post("/api/v1/apps/me", json={"module_slug": "study"}, headers=headers)
+
+    envelope = _fake_analysis_envelope("lecture", "lecture_note", "Lecture", 0.9)
+    fake_client = SimpleNamespace(analyze=AsyncMock(return_value=envelope))
+    monkeypatch.setattr(
+        "app.services.content_analysis.get_brain_client", lambda: fake_client
+    )
+
+    payload = {
+        "content": "Lecture on normalisation",
+        "source_app": "study",
+        "input_id": "lecture-idem",
+    }
+    first = client.post(
+        "/api/v1/brain/process",
+        json=payload,
+        headers={**headers, "Idempotency-Key": "key-1"},
+    )
+    second = client.post(
+        "/api/v1/brain/process",
+        json=payload,
+        headers={**headers, "Idempotency-Key": "key-1"},
+    )
+    assert first.status_code == 201, first.text
+    assert second.status_code == 201, second.text
+    assert first.json()["processing_id"] == second.json()["processing_id"]
+
+
+@pytest.mark.integration
+def test_brain_process_rejects_an_unconnected_source_app(client, monkeypatch):
+    email = f"denied-{uuid.uuid4().hex[:8]}@example.com"
+    _register(client, email)
+    headers = {"Authorization": f"Bearer {_login(client, email)['access_token']}"}
+
+    envelope = _fake_analysis_envelope("lecture", "lecture_note", "Lecture", 0.9)
+    fake_client = SimpleNamespace(analyze=AsyncMock(return_value=envelope))
+    monkeypatch.setattr(
+        "app.services.content_analysis.get_brain_client", lambda: fake_client
+    )
+
+    response = client.post(
+        "/api/v1/brain/process",
+        json={"content": "Lecture", "source_app": "study", "input_id": "lecture-denied"},
+        headers=headers,
+    )
+    assert response.status_code == 403, response.text
+
+
+@pytest.mark.integration
+def test_brain_process_parks_low_confidence_items_for_review(client, monkeypatch):
+    email = f"review-{uuid.uuid4().hex[:8]}@example.com"
+    _register(client, email)
+    headers = {"Authorization": f"Bearer {_login(client, email)['access_token']}"}
+    client.post("/api/v1/apps/me", json={"module_slug": "study"}, headers=headers)
+
+    envelope = _fake_analysis_envelope("lecture", "lecture_note", "maybe a lecture", 0.55)
+    fake_client = SimpleNamespace(analyze=AsyncMock(return_value=envelope))
+    monkeypatch.setattr(
+        "app.services.content_analysis.get_brain_client", lambda: fake_client
+    )
+
+    response = client.post(
+        "/api/v1/brain/process",
+        json={"content": "maybe a lecture", "source_app": "study", "input_id": "lecture-low"},
+        headers=headers,
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["status"] == "awaiting_review"
+    assert body["review_required"] is True
+    assert body["items"][0]["requires_review"] is True
+
+    confirmed = client.post(
+        f"/api/v1/brain/process/{body['processing_id']}/confirm",
+        json={"items": [{"index": 0}]},
+        headers=headers,
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()["status"] == "delivered"

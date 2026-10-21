@@ -8,7 +8,7 @@ the caller opts in.
 import asyncio
 import uuid
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 from app.models.brain_memory import BrainMemory, MemoryKind, MemorySource
 from app.models.user import User
@@ -64,7 +64,8 @@ def make_memory(kind: MemoryKind, content: str) -> BrainMemory:
 
 
 def build_service(provider: FakeProvider, identity) -> tuple[PersonalBrainService, SimpleNamespace]:
-    service = PersonalBrainService(SimpleNamespace(), llm_provider=provider, vault_provider=FakeVault())
+    session = SimpleNamespace(add=Mock(), flush=AsyncMock())
+    service = PersonalBrainService(session, llm_provider=provider, vault_provider=FakeVault())
     memory_repo = SimpleNamespace(
         create=AsyncMock(side_effect=lambda **kwargs: _created_memory(**kwargs)),
         commit=AsyncMock(),
@@ -74,6 +75,7 @@ def build_service(provider: FakeProvider, identity) -> tuple[PersonalBrainServic
     )
     service.identity_repo = SimpleNamespace(get_by_user_id=AsyncMock(return_value=identity))
     service.brain_memory_repo = memory_repo
+    service.app_record_repo = SimpleNamespace(find_by_dedupe=AsyncMock(return_value=None))
     service.memory_repo = SimpleNamespace(
         upsert_for_identity=AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4())),
     )
@@ -189,7 +191,9 @@ def test_ingest_persists_fact_memory():
         assert result["memory_id"] is not None
         kwargs = repo.create.await_args.kwargs
         assert kwargs["kind"] == MemoryKind.FACT
-        assert kwargs["content"] == "Studied DBMS today"
+        # Brain memory keeps the bounded summary, never the full content.
+        assert kwargs["content"] == "a summary"
+        assert result["record_id"]
 
     asyncio.run(_run())
 

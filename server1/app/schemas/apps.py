@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 AppStatus = Literal["live", "planned", "module", "future"]
 ClientType = Literal["web", "mobile", "desktop", "server", "internal"]
+StorageAdapter = Literal["none", "relational", "object"]
 
 
 class ModulePermissionSpec(BaseModel):
@@ -27,7 +28,26 @@ class ModulePermissionSpec(BaseModel):
 
 
 class AppDefinition(BaseModel):
-    """Registry entry for one AURA application or module."""
+    """Registry entry for one AURA application or module.
+
+    The capability fields describe what the application can actually *do* in
+    the platform, not merely that it exists:
+
+    ``categories``
+        Semantic categories the Brain may route to this application.
+    ``record_types``
+        Record types the application is able to store.
+    ``routable``
+        Whether the Brain may deliver routed records here. An application that
+        has no ingestion or storage integration stays ``routable=False`` even
+        when it appears in the catalog.
+    ``storage_adapter``
+        Which storage backend holds this application's records.
+    ``ingest_scope`` / ``ingest_action``
+        Permission required to submit content *into* the Brain pipeline.
+    ``write_scope`` / ``write_action``
+        Permission required to deliver routed records *into* this application.
+    """
 
     slug: str
     name: str
@@ -42,6 +62,14 @@ class AppDefinition(BaseModel):
     ingests: bool = False
     repo_path: str | None = None
     default_permissions: list[ModulePermissionSpec] = Field(default_factory=list)
+    categories: list[str] = Field(default_factory=list)
+    record_types: list[str] = Field(default_factory=list)
+    routable: bool = False
+    storage_adapter: StorageAdapter = "none"
+    ingest_scope: str | None = None
+    ingest_action: str = "write"
+    write_scope: str | None = None
+    write_action: str = "write"
 
 
 class ConnectionCreateRequest(BaseModel):
@@ -99,4 +127,6 @@ class AppIngestResponse(BaseModel):
     partial: bool = False
     memory_id: str | None = None
     vault_entry_id: str | None = None
+    # The application record that holds the full ingested content.
+    record_id: str | None = None
     reason: str | None = None

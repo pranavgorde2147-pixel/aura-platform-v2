@@ -95,6 +95,57 @@ class Settings(BaseSettings):
     # Optional embedded Redis (fakeredis) for local development/tests.
     use_fake_redis: bool = Field(default=False, alias="USE_FAKE_REDIS")
 
+    # ------------------------------------------------------------------
+    # Universal Brain processing / routing policy
+    # ------------------------------------------------------------------
+    # Master switch for the universal processing pipeline
+    # (POST /api/v1/brain/process). When disabled the endpoint reports the
+    # pipeline as disabled instead of silently accepting input.
+    brain_routing_enabled: bool = Field(default=True, alias="BRAIN_ROUTING_ENABLED")
+    brain_routing_max_segments: int = Field(
+        default=12, ge=1, le=32, alias="BRAIN_ROUTING_MAX_SEGMENTS"
+    )
+    # Confidence thresholds per risk tier. These are *policy* values, not
+    # calibrated probabilities; nothing in the platform claims calibration.
+    brain_routing_confidence_note: float = Field(
+        default=0.50, ge=0.0, le=1.0, alias="BRAIN_ROUTING_CONFIDENCE_NOTE"
+    )
+    brain_routing_confidence_medium: float = Field(
+        default=0.70, ge=0.0, le=1.0, alias="BRAIN_ROUTING_CONFIDENCE_MEDIUM"
+    )
+    brain_routing_confidence_sensitive: float = Field(
+        default=0.85, ge=0.0, le=1.0, alias="BRAIN_ROUTING_CONFIDENCE_SENSITIVE"
+    )
+    # When false, nothing is written without an explicit confirmation call.
+    brain_routing_auto_deliver: bool = Field(default=True, alias="BRAIN_ROUTING_AUTO_DELIVER")
+    # Whether the pipeline may write to Brain memory at all.
+    brain_routing_memory_write_enabled: bool = Field(
+        default=True, alias="BRAIN_ROUTING_MEMORY_WRITE_ENABLED"
+    )
+    # Upper bound for the text written into a brain memory. The full source is
+    # never copied into memory; only a bounded index line is.
+    brain_routing_memory_summary_max_chars: int = Field(
+        default=1000, ge=80, le=8000, alias="BRAIN_ROUTING_MEMORY_SUMMARY_MAX_CHARS"
+    )
+    # Retention windows in days. 0 means "keep until the user deletes it".
+    brain_routing_memory_retention_days: int = Field(
+        default=0, ge=0, le=3650, alias="BRAIN_ROUTING_MEMORY_RETENTION_DAYS"
+    )
+    brain_routing_record_retention_days: int = Field(
+        default=0, ge=0, le=3650, alias="BRAIN_ROUTING_RECORD_RETENTION_DAYS"
+    )
+    # Bounded delivery retries per destination operation.
+    brain_routing_max_delivery_retries: int = Field(
+        default=3, ge=0, le=10, alias="BRAIN_ROUTING_MAX_DELIVERY_RETRIES"
+    )
+    brain_routing_analysis_timeout_seconds: float = Field(
+        default=60.0, gt=0.0, alias="BRAIN_ROUTING_ANALYSIS_TIMEOUT_SECONDS"
+    )
+    # When true, a submitter must provide an idempotency key.
+    brain_routing_idempotency_required: bool = Field(
+        default=False, alias="BRAIN_ROUTING_IDEMPOTENCY_REQUIRED"
+    )
+
     @property
     def effective_storage_token(self) -> str:
         """Return the token used to authenticate against the storage API."""

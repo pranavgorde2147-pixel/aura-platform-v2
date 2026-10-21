@@ -16,7 +16,9 @@ services:
       # is pointed at the laptop tunnel.
       - key: AI_SERVER_MODEL
         value: Qwen3.5-0.8B
-      # Set values in the Render dashboard (secrets never committed):
+      # Set secrets in the Render dashboard (never committed). Server 1's
+      # INTERNAL_API_TOKEN must exactly match the laptop-hosted Server 2 value;
+      # sync:false values are independently configured, not synchronized.
       - key: POSTGRES_URL
         sync: false
       - key: REDIS_URL
@@ -83,7 +85,8 @@ services:
         value: /var/data/objects
       - key: STORAGE_DATABASE_URL
         value: sqlite+aiosqlite:////var/data/storage.db
-      # Set values in the Render dashboard (secrets never committed):
+      # Set values in the Render dashboard (secrets never committed). When
+      # deployed on Render, INTERNAL_API_TOKEN must match Server 1's value.
       - key: INTERNAL_API_TOKEN
         sync: false
       - key: STORAGE_API_TOKEN

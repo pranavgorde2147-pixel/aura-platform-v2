@@ -36,14 +36,19 @@ CATALOG: dict[str, AppDefinition] = {
     "aura-core": AppDefinition(
         slug="aura-core",
         name="AURA Core",
-        description="Central AURA account/identity and dashboard backend (Server 1).",
-        client_type="web",
+        description="Central AURA Android assistant for authenticated chat with AURA Brain.",
+        client_type="mobile",
         status="live",
         platform_type="aura",
-        purpose="Account registration, login, sessions, user identity and app authorization.",
-        needs_from_aura=["identity"],
+        purpose="Central assistant chat and ecosystem entry point using the user's authorized Brain.",
+        sends_to_aura=["chat queries"],
+        needs_from_aura=["brain responses"],
+        queries_brain=True,
         repo_path="server1/",
-        default_permissions=[ModulePermissionSpec(scope="identity", action="read")],
+        default_permissions=[ModulePermissionSpec(scope="brain", action="read")],
+        # Chat is query-only; the app gets no memory-write or routed-record access.
+        ingest_scope=None,
+        routable=False,
     ),
     "brain": AppDefinition(
         slug="brain",
@@ -63,6 +68,9 @@ CATALOG: dict[str, AppDefinition] = {
             ModulePermissionSpec(scope="memory", action="read"),
             ModulePermissionSpec(scope="memory", action="write"),
         ],
+        ingest_scope="memory",
+        ingest_action="write",
+        routable=False,
     ),
     "meeting": AppDefinition(
         slug="meeting",
@@ -81,7 +89,16 @@ CATALOG: dict[str, AppDefinition] = {
             ModulePermissionSpec(scope="brain", action="read"),
             ModulePermissionSpec(scope="memory", action="write"),
             ModulePermissionSpec(scope="files", action="write"),
+            ModulePermissionSpec(scope="meeting", action="write"),
         ],
+        ingest_scope="memory",
+        ingest_action="write",
+        write_scope="meeting",
+        write_action="write",
+        categories=["meeting", "task"],
+        record_types=["meeting_transcript", "meeting_summary", "decision", "action_item"],
+        routable=True,
+        storage_adapter="relational",
     ),
     "memory": AppDefinition(
         slug="memory",
@@ -101,6 +118,11 @@ CATALOG: dict[str, AppDefinition] = {
             ModulePermissionSpec(scope="memory", action="read"),
             ModulePermissionSpec(scope="memory", action="write"),
         ],
+        ingest_scope="memory",
+        ingest_action="write",
+        # Brain memory is written through the dedicated memory path, never as a
+        # routed application record.
+        routable=False,
     ),
     "files": AppDefinition(
         slug="files",
@@ -119,6 +141,14 @@ CATALOG: dict[str, AppDefinition] = {
             ModulePermissionSpec(scope="files", action="read"),
             ModulePermissionSpec(scope="files", action="write"),
         ],
+        ingest_scope="files",
+        ingest_action="write",
+        write_scope="files",
+        write_action="write",
+        categories=["document"],
+        record_types=["document"],
+        routable=True,
+        storage_adapter="object",
     ),
     "notes": AppDefinition(
         slug="notes",
@@ -136,7 +166,16 @@ CATALOG: dict[str, AppDefinition] = {
             ModulePermissionSpec(scope="brain", action="read"),
             ModulePermissionSpec(scope="memory", action="write"),
             ModulePermissionSpec(scope="files", action="write"),
+            ModulePermissionSpec(scope="notes", action="write"),
         ],
+        ingest_scope="memory",
+        ingest_action="write",
+        write_scope="notes",
+        write_action="write",
+        categories=["note", "document"],
+        record_types=["note", "document"],
+        routable=True,
+        storage_adapter="relational",
     ),
     "study": AppDefinition(
         slug="study",
@@ -154,7 +193,22 @@ CATALOG: dict[str, AppDefinition] = {
             ModulePermissionSpec(scope="brain", action="read"),
             ModulePermissionSpec(scope="memory", action="write"),
             ModulePermissionSpec(scope="timeline", action="write"),
+            ModulePermissionSpec(scope="study", action="write"),
         ],
+        ingest_scope="memory",
+        ingest_action="write",
+        write_scope="study",
+        write_action="write",
+        categories=["study_material", "lecture", "deadline"],
+        record_types=[
+            "lecture_note",
+            "lecture_transcript",
+            "study_material",
+            "concept",
+            "assignment_deadline",
+        ],
+        routable=True,
+        storage_adapter="relational",
     ),
     "diary": AppDefinition(
         slug="diary",
@@ -172,7 +226,16 @@ CATALOG: dict[str, AppDefinition] = {
             ModulePermissionSpec(scope="brain", action="read"),
             ModulePermissionSpec(scope="memory", action="write"),
             ModulePermissionSpec(scope="timeline", action="write"),
+            ModulePermissionSpec(scope="diary", action="write"),
         ],
+        ingest_scope="memory",
+        ingest_action="write",
+        write_scope="diary",
+        write_action="write",
+        categories=["diary_event"],
+        record_types=["diary_entry", "personal_event"],
+        routable=True,
+        storage_adapter="relational",
     ),
     "travel": AppDefinition(
         slug="travel",
@@ -190,7 +253,16 @@ CATALOG: dict[str, AppDefinition] = {
             ModulePermissionSpec(scope="brain", action="read"),
             ModulePermissionSpec(scope="memory", action="write"),
             ModulePermissionSpec(scope="files", action="write"),
+            ModulePermissionSpec(scope="travel", action="write"),
         ],
+        ingest_scope="memory",
+        ingest_action="write",
+        write_scope="travel",
+        write_action="write",
+        categories=["travel"],
+        record_types=["trip", "itinerary", "travel_booking"],
+        routable=True,
+        storage_adapter="relational",
     ),
     "tasks": AppDefinition(
         slug="tasks",
@@ -208,7 +280,16 @@ CATALOG: dict[str, AppDefinition] = {
             ModulePermissionSpec(scope="brain", action="read"),
             ModulePermissionSpec(scope="memory", action="read"),
             ModulePermissionSpec(scope="memory", action="write"),
+            ModulePermissionSpec(scope="tasks", action="write"),
         ],
+        ingest_scope="memory",
+        ingest_action="write",
+        write_scope="tasks",
+        write_action="write",
+        categories=["task", "deadline"],
+        record_types=["task", "assignment_deadline"],
+        routable=True,
+        storage_adapter="relational",
     ),
     "timeline": AppDefinition(
         slug="timeline",
@@ -227,6 +308,14 @@ CATALOG: dict[str, AppDefinition] = {
             ModulePermissionSpec(scope="timeline", action="read"),
             ModulePermissionSpec(scope="timeline", action="write"),
         ],
+        ingest_scope="timeline",
+        ingest_action="write",
+        write_scope="timeline",
+        write_action="write",
+        categories=["calendar_event", "project"],
+        record_types=["calendar_event", "project_note"],
+        routable=True,
+        storage_adapter="relational",
     ),
     "notifications": AppDefinition(
         slug="notifications",
@@ -244,6 +333,10 @@ CATALOG: dict[str, AppDefinition] = {
             ModulePermissionSpec(scope="notifications", action="read"),
             ModulePermissionSpec(scope="notifications", action="write"),
         ],
+        ingest_scope="notifications",
+        ingest_action="write",
+        # Notification Hub consumes events; it does not store application records.
+        routable=False,
     ),
     "workflow": AppDefinition(
         slug="workflow",
@@ -262,6 +355,14 @@ CATALOG: dict[str, AppDefinition] = {
             ModulePermissionSpec(scope="workflow", action="read"),
             ModulePermissionSpec(scope="workflow", action="write"),
         ],
+        ingest_scope="workflow",
+        ingest_action="write",
+        write_scope="workflow",
+        write_action="write",
+        categories=["task", "project"],
+        record_types=["task", "project_note"],
+        routable=True,
+        storage_adapter="relational",
     ),
     "search": AppDefinition(
         slug="search",
@@ -280,6 +381,9 @@ CATALOG: dict[str, AppDefinition] = {
             ModulePermissionSpec(scope="memory", action="read"),
             ModulePermissionSpec(scope="files", action="read"),
         ],
+        # Search is read-only.
+        ingest_scope=None,
+        routable=False,
     ),
     "knowledge-graph": AppDefinition(
         slug="knowledge-graph",
@@ -298,6 +402,14 @@ CATALOG: dict[str, AppDefinition] = {
             ModulePermissionSpec(scope="knowledge", action="read"),
             ModulePermissionSpec(scope="knowledge", action="write"),
         ],
+        ingest_scope="knowledge",
+        ingest_action="write",
+        write_scope="knowledge",
+        write_action="write",
+        categories=["project", "personal_fact"],
+        record_types=["project_note", "memory_fact"],
+        routable=True,
+        storage_adapter="relational",
     ),
     "chronos": AppDefinition(
         slug="chronos",
@@ -316,6 +428,9 @@ CATALOG: dict[str, AppDefinition] = {
             ModulePermissionSpec(scope="knowledge", action="read"),
             ModulePermissionSpec(scope="timeline", action="write"),
         ],
+        # Chronos is a platform-family marker with no running service yet.
+        ingest_scope=None,
+        routable=False,
     ),
     "health": AppDefinition(
         slug="health",
@@ -333,7 +448,16 @@ CATALOG: dict[str, AppDefinition] = {
             ModulePermissionSpec(scope="brain", action="read"),
             ModulePermissionSpec(scope="memory", action="write"),
             ModulePermissionSpec(scope="notifications", action="read"),
+            ModulePermissionSpec(scope="health", action="write"),
         ],
+        ingest_scope="memory",
+        ingest_action="write",
+        write_scope="health",
+        write_action="write",
+        categories=["health"],
+        record_types=["wellness_event", "health_record"],
+        routable=True,
+        storage_adapter="relational",
     ),
 }
 
@@ -346,6 +470,44 @@ def list_catalog() -> list[AppDefinition]:
 def get_catalog_app(slug: str) -> AppDefinition | None:
     """Return one catalog entry, or None if unknown."""
     return CATALOG.get(slug)
+
+
+def list_routable_apps() -> list[AppDefinition]:
+    """Return the applications the Brain is allowed to deliver records to.
+
+    "Allowed" means the catalog declares a storage adapter and the required
+    record types. Permissions are still checked per user at delivery time.
+    """
+    return [
+        app
+        for app in list_catalog()
+        if app.routable and app.storage_adapter != "none" and app.record_types
+    ]
+
+
+def find_destinations_for_category(category: str) -> list[AppDefinition]:
+    """Return routable applications that accept the given semantic category."""
+    return [app for app in list_routable_apps() if category in app.categories]
+
+
+def get_ingest_permission(slug: str) -> tuple[str, str] | None:
+    """Return the ``(scope, action)`` needed to submit input as ``slug``.
+
+    ``None`` means the application cannot submit content into the Brain
+    pipeline at all.
+    """
+    app = CATALOG.get(slug)
+    if app is None or app.ingest_scope is None:
+        return None
+    return (app.ingest_scope, app.ingest_action)
+
+
+def get_destination_permission(slug: str) -> tuple[str, str] | None:
+    """Return the ``(scope, action)`` required to write records into ``slug``."""
+    app = CATALOG.get(slug)
+    if app is None or app.write_scope is None:
+        return None
+    return (app.write_scope, app.write_action)
 
 
 class AppConnectionService:
@@ -370,6 +532,25 @@ class AppConnectionService:
             )
         )
         return result.scalars().first()
+
+    async def get_connection_by_slug(self, user: User, slug: str) -> InstalledModule | None:
+        """Return the user's connection to an application, active or not."""
+        result = await self.session.execute(
+            select(InstalledModule).where(
+                InstalledModule.user_id == user.id,
+                InstalledModule.module_slug == slug,
+            )
+        )
+        return result.scalars().first()
+
+    @staticmethod
+    def has_permission(module: InstalledModule, scope: str, action: str) -> bool:
+        """Return True when the connection grants ``scope:action``."""
+        target = PermissionAction(action)
+        return any(
+            permission.scope == scope and permission.permission == target
+            for permission in module.module_permissions
+        )
 
     async def has_active_permission(
         self,
