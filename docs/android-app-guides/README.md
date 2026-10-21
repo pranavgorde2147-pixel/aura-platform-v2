@@ -22,6 +22,12 @@ This folder contains **one guide per app** for Android Studio agents. Each guide
 
 **Auth model:** After login, send `Authorization: Bearer <access_token>` on every protected request. Never put tokens in query params.
 
-**Connection model:** "Auto-connect" = call `POST /api/v1/apps/me` with `{"module_slug": "<APP_SLUG>"}` using the logged-in user's token. The server grants default permissions from the catalog. Idempotent for the same user+slug? If already connected, the API returns `409 CONFLICT` (`App already connected: ...`). Your client must handle 409 gracefully (treat as already connected).
+**Connection model:** After login, call `POST /api/v1/apps/me` with `{"module_slug": "<APP_SLUG>"}` using the logged-in user's token and omit `permissions` to receive the catalog defaults. A successful connection is `201`. This endpoint does not update an existing connection: it returns `409 CONFLICT` when that app is already connected. On `409`, fetch `GET /api/v1/apps/me`, locate the connection by `module_slug`, and inspect its `is_active` state and grants.
 
-**Important:** The fix for `brain:read` is in **server1**. If you're testing against Render and still see 403 on `/brain/query` with `source_app=<slug>`, ensure the deployed server1 includes the updated `app/services/app_registry.py` (which grants `brain:read` to apps with `queries_brain=true`).
+`PATCH /api/v1/apps/me/{connection_id}` updates an existing connection. When `permissions` is provided, it **replaces the entire permission list**; it does not add only the listed permission. Before updating, merge the required permission into the permissions already returned by `/apps/me`, preserving existing required grants. Then fetch `/apps/me` again and verify the final active connection has every required grant. Do not delete/reconnect a user's connection to change permissions.
+
+For AURA Core, the required query grant is only `brain:read`. The current registry defaults to `brain:read`; do not request `memory:write` or `timeline:write` for chat. Preserve `identity:read` if the app's existing functionality needs it. Brain requests must use `source_app: "aura-core"`.
+
+Handle response classes distinctly: `401` means authentication is missing or expired; `403` means the authenticated app connection lacks the required permission (not a network failure); `409` means the app is already connected and must be inspected/reconciled as above. Report actual transport failures and `5xx` responses separately from these API errors.
+
+**Important:** The registry's default grant affects only new connections. It does not retroactively update existing user connections. For a production `403`, verify the deployed Server 1 catalog and the user's `/api/v1/apps/me` connection rather than assuming the connection inherited the new default.

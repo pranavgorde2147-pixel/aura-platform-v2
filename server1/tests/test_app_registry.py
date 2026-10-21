@@ -88,6 +88,16 @@ def test_catalog_is_populated_with_unique_slugs():
     assert "chronos" in slugs
 
 
+def test_aura_core_registry_requires_only_brain_read_for_queries():
+    catalog = {app.slug: app for app in list_catalog()}
+    aura_core = catalog["aura-core"]
+
+    assert aura_core.queries_brain is True
+    assert {(permission.scope, permission.action) for permission in aura_core.default_permissions} == {
+        ("brain", "read")
+    }
+
+
 def test_catalog_endpoints_are_public():
     app = create_app()
     with TestClient(app) as client:

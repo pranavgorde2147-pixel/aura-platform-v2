@@ -456,6 +456,15 @@ def test_aura_core_brain_query_requires_its_own_connection_and_brain_read(client
         headers=headers,
     )
     assert connected_without_permission.status_code == 201
+
+    # A repeated connect does not reconcile or replace an existing grant set.
+    already_connected = client.post(
+        "/api/v1/apps/me",
+        json={"module_slug": "aura-core"},
+        headers=headers,
+    )
+    assert already_connected.status_code == 409
+
     denied_missing_permission = client.post(
         "/api/v1/brain/query",
         json={"query": "hello", "source_app": "aura-core"},
@@ -463,15 +472,33 @@ def test_aura_core_brain_query_requires_its_own_connection_and_brain_read(client
     )
     assert denied_missing_permission.status_code == 403
 
-    connection_id = connected_without_permission.json()["id"]
+    # The client must fetch the existing connection and merge permissions:
+    # PATCH replaces the full permission list rather than adding one grant.
+    connections = client.get("/api/v1/apps/me", headers=headers).json()["items"]
+    core_connection = next(item for item in connections if item["module_slug"] == "aura-core")
+    assert {
+        (permission["scope"], permission["action"])
+        for permission in core_connection["permissions"]
+    } == {("identity", "read")}
+
     granted = client.patch(
-        f"/api/v1/apps/me/{connection_id}",
-        json={"permissions": [{"scope": "brain", "action": "read"}]},
+        f"/api/v1/apps/me/{core_connection['id']}",
+        json={
+            "permissions": [
+                {"scope": permission["scope"], "action": permission["action"]}
+                for permission in core_connection["permissions"]
+            ]
+            + [{"scope": "brain", "action": "read"}]
+        },
         headers=headers,
     )
     assert granted.status_code == 200, granted.text
-    assert {(p["scope"], p["action"]) for p in granted.json()["permissions"]} == {
-        ("brain", "read")
+    assert {
+        (permission["scope"], permission["action"])
+        for permission in granted.json()["permissions"]
+    } == {
+        ("identity", "read"),
+        ("brain", "read"),
     }
 
     # The query succeeds only once the same user's connection grants brain:read.
@@ -485,10 +512,13 @@ def test_aura_core_brain_query_requires_its_own_connection_and_brain_read(client
 
     connections = client.get("/api/v1/apps/me", headers=headers).json()["items"]
     core_connection = next(item for item in connections if item["module_slug"] == "aura-core")
-    assert any(
-        permission["scope"] == "brain" and permission["action"] == "read"
+    assert {
+        (permission["scope"], permission["action"])
         for permission in core_connection["permissions"]
-    )
+    } == {
+        ("identity", "read"),
+        ("brain", "read"),
+    }
 
 
 @pytest.mark.integration
@@ -522,6 +552,21 @@ def test_brain_query_authorized_after_connecting_core_apps(client):
     for slug in ("aura-core", "study", "meeting", "diary", "travel", "health"):
         connect = client.post("/api/v1/apps/me", json={"module_slug": slug}, headers=headers)
         assert connect.status_code == 201, connect.text
+        if slug == "aura-core":
+            assert {
+                (permission["scope"], permission["action"])
+                for permission in connect.json()["permissions"]
+            } == {("brain", "read")}
+        elif slug in {"study", "diary"}:
+            assert {
+                (permission["scope"], permission["action"])
+                for permission in connect.json()["permissions"]
+            } == {
+                ("brain", "read"),
+                ("memory", "write"),
+                ("timeline", "write"),
+                (slug, "write"),
+            }
 
         result = client.post(
             "/api/v1/brain/query",
