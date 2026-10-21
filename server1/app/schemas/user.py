@@ -12,14 +12,14 @@ from pydantic import BaseModel, EmailStr, Field
 class UserBase(BaseModel):
     """Base user schema with common fields."""
 
-    email: EmailStr
-    full_name: Optional[str] = None
+    email: EmailStr = Field(..., max_length=255)
+    full_name: Optional[str] = Field(default=None, max_length=255)
 
 
 class UserCreate(UserBase):
     """Schema for creating a new user."""
 
-    password: str = Field(..., min_length=8)
+    password: str = Field(..., min_length=8, max_length=255)
 
 
 class UserResponse(UserBase):

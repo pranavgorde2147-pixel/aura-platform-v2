@@ -25,4 +25,7 @@ USER app
 
 EXPOSE 8000
 
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# Apply schema migrations before serving so a fresh database is always
+# provisioned. Health/liveness only proves:
+# connectivity, not that the schema exists, so this must run on every boot.
+CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

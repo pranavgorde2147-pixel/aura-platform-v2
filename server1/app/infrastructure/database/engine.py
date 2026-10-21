@@ -12,6 +12,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.pool import QueuePool
 
 from app.core.config import get_settings
+from app.infrastructure.database.session import to_sync_url
 
 _engine: Engine | None = None
 
@@ -25,7 +26,7 @@ def create_database_engine() -> Engine:
         raise ValueError("POSTGRES_URL is not configured")
 
     return create_engine(
-        database_url,
+        to_sync_url(database_url),
         poolclass=QueuePool,
         pool_size=10,
         max_overflow=20,

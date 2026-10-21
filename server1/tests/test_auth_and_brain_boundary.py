@@ -3,13 +3,15 @@ import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from sqlalchemy.exc import IntegrityError
+
 from app.core.jwt import decode_token
 from app.core.security import hash_password
 from app.models.user import User
 from app.services.auth import AuthService
 from app.services.brain_provider import MockGeneralLLMProvider, MockPersonalBrainLLMProvider
 from app.services.personal_brain import PersonalBrainService
-from app.services.user import UserService
+from app.services.user import DuplicateEmailError, UserCreationError, UserService
 
 
 def make_user(email: str = "user@example.com") -> User:
@@ -204,6 +206,116 @@ def test_user_registration_binds_single_identity_and_brain():
         assert created.email == "new-user@example.com"
         assert service.identity_repo.create.await_count == 1
         assert service.brain_repo.create.await_count == 1
+
+    asyncio.run(_run())
+
+
+def _integrity_error(sqlstate: str, message: str) -> IntegrityError:
+    orig = SimpleNamespace(sqlstate=sqlstate)
+    return IntegrityError("INSERT INTO users", {}, Exception(message), orig)
+
+
+def _wired_registration_service(
+    *,
+    user_create=None,
+    identity_create=None,
+    brain_create=None,
+) -> UserService:
+    service = UserService(SimpleNamespace())
+    service.user_repo = SimpleNamespace(
+        create=AsyncMock(return_value=make_user("new-user@example.com"))
+        if user_create is None
+        else AsyncMock(side_effect=user_create),
+        commit=AsyncMock(),
+        rollback=AsyncMock(),
+    )
+    service.identity_repo = SimpleNamespace(
+        create=AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4()))
+        if identity_create is None
+        else AsyncMock(side_effect=identity_create)
+    )
+    service.brain_repo = SimpleNamespace(
+        create=AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4()))
+        if brain_create is None
+        else AsyncMock(side_effect=brain_create)
+    )
+    return service
+
+
+def test_registration_commits_once_for_the_whole_account_graph():
+    async def _run():
+        service = _wired_registration_service()
+
+        created = await service.create_user(
+            "new-user@example.com", hash_password("password123"), "New User"
+        )
+
+        assert created.email == "new-user@example.com"
+        assert service.user_repo.commit.await_count == 1
+        assert service.user_repo.rollback.await_count == 0
+        assert service.identity_repo.create.await_count == 1
+        assert service.brain_repo.create.await_count == 1
+
+    asyncio.run(_run())
+
+
+def test_registration_rolls_back_and_flags_duplicate_email():
+    async def _run():
+        service = _wired_registration_service(
+            user_create=_integrity_error(
+                "23505", "duplicate key value violates unique constraint uq_users_email"
+            )
+        )
+
+        try:
+            await service.create_user("dup@example.com", hash_password("password123"))
+            raise AssertionError("expected DuplicateEmailError")
+        except DuplicateEmailError as exc:
+            assert exc.email == "dup@example.com"
+
+        # The whole transaction is rolled back and nothing else was attempted.
+        assert service.user_repo.rollback.await_count == 1
+        assert service.user_repo.commit.await_count == 0
+        assert service.identity_repo.create.await_count == 0
+        assert service.brain_repo.create.await_count == 0
+
+    asyncio.run(_run())
+
+
+def test_registration_is_atomic_when_identity_creation_fails():
+    async def _run():
+        service = _wired_registration_service(identity_create=RuntimeError("boom"))
+
+        try:
+            await service.create_user("new-user@example.com", hash_password("password123"))
+            raise AssertionError("expected UserCreationError")
+        except UserCreationError:
+            pass
+
+        # No commit and no brain were created: the account is never half-built.
+        assert service.user_repo.commit.await_count == 0
+        assert service.user_repo.rollback.await_count == 1
+        assert service.brain_repo.create.await_count == 0
+
+    asyncio.run(_run())
+
+
+def test_registration_surfaces_non_unique_integrity_as_creation_error():
+    async def _run():
+        service = _wired_registration_service(
+            brain_create=_integrity_error("23503", "insert or update violates foreign key constraint")
+        )
+
+        try:
+            await service.create_user("new-user@example.com", hash_password("password123"))
+            raise AssertionError("expected UserCreationError")
+        except UserCreationError:
+            pass
+        except DuplicateEmailError:  # pragma: no cover - regression guard
+            raise AssertionError("foreign-key failure must not be reported as duplicate email")
+
+        assert service.user_repo.rollback.await_count == 1
+        assert service.user_repo.commit.await_count == 0
 
     asyncio.run(_run())
 

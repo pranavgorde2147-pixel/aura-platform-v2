@@ -8,6 +8,7 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from app.core.config import get_settings
+from app.infrastructure.database.session import to_sync_url
 # Import all ORM models so their tables are registered on the shared metadata.
 from app.models import (
     ai_identity,
@@ -30,7 +31,9 @@ if config.config_file_name is not None:
 
 settings = get_settings()
 if settings.postgres_url:
-    config.set_main_option("sqlalchemy.url", settings.postgres_url)
+    # Use the installed psycopg v3 driver explicitly; a bare ``postgresql://``
+    # URL would otherwise resolve to psycopg2, which is not a dependency.
+    config.set_main_option("sqlalchemy.url", to_sync_url(settings.postgres_url))
 
 target_metadata = Base.metadata
 

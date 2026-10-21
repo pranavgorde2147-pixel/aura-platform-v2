@@ -24,11 +24,34 @@ _session_factory: async_sessionmaker[AsyncSession] | None = None
 
 
 def to_async_url(database_url: str) -> str:
-    """Normalise a psycopg URL to the asyncpg driver used by the app."""
+    """Normalise a PostgreSQL URL to the asyncpg driver used by the app.
+
+    Handles both the modern ``postgresql://`` and the legacy ``postgres://``
+    scheme (Render, Heroku) so the async engine never falls back to psycopg2.
+    """
     if database_url.startswith("postgresql+psycopg://"):
         return database_url.replace("postgresql+psycopg://", "postgresql+asyncpg://", 1)
     if database_url.startswith("postgresql://"):
         return database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    if database_url.startswith("postgres://"):
+        return database_url.replace("postgres://", "postgresql+asyncpg://", 1)
+    return database_url
+
+
+def to_sync_url(database_url: str) -> str:
+    """Normalise a PostgreSQL URL to the psycopg v3 driver used synchronously.
+
+    Alembic and the synchronous engine must never fall back to the default
+    ``psycopg2`` DBAPI, which is not installed. Providers (Render, Neon, Heroku)
+    hand out ``postgresql://`` or legacy ``postgres://`` URLs, so pin the
+    installed psycopg v3 driver instead.
+    """
+    if database_url.startswith("postgresql+asyncpg://"):
+        return database_url.replace("postgresql+asyncpg://", "postgresql+psycopg://", 1)
+    if database_url.startswith("postgresql://"):
+        return database_url.replace("postgresql://", "postgresql+psycopg://", 1)
+    if database_url.startswith("postgres://"):
+        return database_url.replace("postgres://", "postgresql+psycopg://", 1)
     return database_url
 
 

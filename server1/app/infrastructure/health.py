@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.core.config import get_settings
+from app.core.logging import get_logger
 from app.infrastructure.brain_client import get_brain_client
 from app.infrastructure.database.health import check_database_health
 from app.infrastructure.database.session import get_db
@@ -21,6 +22,8 @@ from app.infrastructure.qdrant.client import qdrant_client
 from app.infrastructure.qdrant.health import probe_qdrant
 from app.infrastructure.redis.client import redis_client
 from app.infrastructure.storage_client import StorageConfigurationError, get_storage_client
+
+logger = get_logger(__name__)
 
 
 async def _check_database() -> dict[str, Any]:
@@ -65,7 +68,27 @@ async def _check_ai_server() -> dict[str, Any]:
         return {"status": "unavailable", "error": type(exc).__name__}
     if result is None:
         return {"status": "unavailable"}
-    return {"status": "connected", "model": result.get("model"), "provider": result.get("provider")}
+
+    model = result.get("model")
+    configured_model = get_settings().ai_server_model
+    status: dict[str, Any] = {
+        "status": "connected",
+        "model": model,
+        "provider": result.get("provider"),
+    }
+    if model and configured_model and model != configured_model:
+        # Every inference request carries AI_SERVER_MODEL; a mismatch makes
+        # Server 2 reject it with HTTP 400 and silently degrade the answer.
+        status["model_match"] = False
+        status["configured_model"] = configured_model
+        logger.warning(
+            "Server 2 reports model %s but AI_SERVER_MODEL is %s; inference will be rejected",
+            model,
+            configured_model,
+        )
+    else:
+        status["model_match"] = True
+    return status
 
 
 async def _check_storage_server() -> dict[str, Any]:

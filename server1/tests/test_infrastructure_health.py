@@ -8,6 +8,7 @@ are dependencies: their absence yields ``degraded`` (core still ready), never
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -93,6 +94,38 @@ def test_storage_not_ready_is_not_reported_as_connected(monkeypatch):
     result = asyncio.run(health_module._check_storage_server())
     assert result["status"] == "unavailable"
     assert result["http_status"] == 503
+
+
+def _patch_ai_client(monkeypatch, health_result):
+    class Client:
+        async def health_check(self):
+            return health_result
+
+    monkeypatch.setattr(health_module, "get_brain_client", lambda: Client())
+
+
+def test_ai_server_model_match_reports_true(monkeypatch):
+    _patch_ai_client(monkeypatch, {"status": "ok", "model": "Qwen3.5-0.8B", "provider": "gguf"})
+    monkeypatch.setattr(
+        health_module, "get_settings", lambda: SimpleNamespace(ai_server_model="Qwen3.5-0.8B")
+    )
+    result = asyncio.run(health_module._check_ai_server())
+    assert result["status"] == "connected"
+    assert result["model_match"] is True
+    assert "configured_model" not in result
+
+
+def test_ai_server_model_mismatch_is_flagged(monkeypatch):
+    _patch_ai_client(monkeypatch, {"status": "ok", "model": "Qwen3.5-0.8B", "provider": "gguf"})
+    monkeypatch.setattr(
+        health_module, "get_settings", lambda: SimpleNamespace(ai_server_model="qwen/qwen3.8-27b")
+    )
+    result = asyncio.run(health_module._check_ai_server())
+    # Reachability is still connected, but the mismatch (which makes every
+    # inference request 400) is surfaced explicitly.
+    assert result["status"] == "connected"
+    assert result["model_match"] is False
+    assert result["configured_model"] == "qwen/qwen3.8-27b"
 
 
 def test_qdrant_configuration_error_is_reported(monkeypatch):
