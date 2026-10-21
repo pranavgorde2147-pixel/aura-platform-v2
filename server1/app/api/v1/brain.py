@@ -20,7 +20,7 @@ from app.schemas.brain import (
     MemoryUpdateRequest,
 )
 from app.services.app_registry import AppConnectionService
-from app.services.personal_brain import PersonalBrainService
+from app.services.personal_brain import BrainRecordRetrievalError, PersonalBrainService
 
 router = APIRouter(prefix="/brain", tags=["Brain"])
 
@@ -43,14 +43,20 @@ async def query_brain(
             )
 
     service = PersonalBrainService(session)
-    result = await service.process_query(
-        current_user,
-        payload.query,
-        payload.context or {},
-        use_memory=payload.use_memory,
-        persist_interaction=payload.persist_interaction,
-        memory_limit=payload.memory_limit,
-    )
+    try:
+        result = await service.process_query(
+            current_user,
+            payload.query,
+            payload.context or {},
+            use_memory=payload.use_memory,
+            persist_interaction=payload.persist_interaction,
+            memory_limit=payload.memory_limit,
+        )
+    except BrainRecordRetrievalError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="A selected Brain record is temporarily unavailable.",
+        ) from exc
     return BrainQueryResponse(**result)
 
 

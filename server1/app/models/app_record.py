@@ -5,7 +5,7 @@ separate from ``brain_memories``:
 
 * ``brain_memories`` holds short, user-specific context used for future
   reasoning (facts, preferences, short index lines).
-* ``app_records`` holds the *permanent records of an application*: lecture
+* ``app_records`` holds the *canonical records of an application*: lecture
   notes, meeting transcripts, diary entries, tasks, trips and documents.
 
 Records are partitioned by ``destination_app`` and ``record_type`` so each
@@ -14,9 +14,9 @@ owner, its provenance (the processing run and segment it came from), its
 retention policy and its processing status.
 
 Full source content is stored **once**: when a destination is backed by the
-object storage service (Server 3, hosted inside Server 2) the body lives in
-the object store and ``app_records`` keeps a pointer (``storage_type="object"``)
-instead of a second copy of the bytes.
+object storage API hosted on Server 2, the body lives in the object store and
+``app_records`` keeps a pointer (``storage_type="object"``) instead of a
+second copy of the bytes.
 """
 
 from __future__ import annotations
@@ -26,12 +26,16 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import (
+    CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
+    JSON,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -92,6 +96,15 @@ class AppRecord(BaseModel):
     occurred_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
     )
+    categories: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    topics: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    record_metadata: Mapped[dict[str, object]] = mapped_column(
+        "metadata", JSON, default=dict, nullable=False
+    )
+    access_policy: Mapped[str] = mapped_column(
+        String(32), default="owner_only", nullable=False
+    )
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     retention_policy: Mapped[str] = mapped_column(String(64), default="default", nullable=False)
     expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
@@ -102,3 +115,62 @@ class AppRecord(BaseModel):
 
     user: Mapped["User"] = relationship(lazy="selectin")
     source_run: Mapped["BrainProcessingRun | None"] = relationship(lazy="selectin")
+
+
+class AppRecordLink(BaseModel):
+    """Owner-scoped relationship or app reference for a canonical record."""
+
+    __tablename__ = "app_record_links"
+    __table_args__ = (
+        CheckConstraint(
+            "(related_record_id IS NULL) <> (target_app IS NULL)",
+            name="ck_app_record_links_one_target",
+        ),
+        CheckConstraint(
+            "related_record_id IS NULL OR related_record_id <> record_id",
+            name="ck_app_record_links_no_self_reference",
+        ),
+        Index(
+            "uq_app_record_links_target_app_relationship",
+            "user_id",
+            "record_id",
+            "target_app",
+            "relation_type",
+            unique=True,
+            postgresql_where=text("related_record_id IS NULL"),
+            sqlite_where=text("related_record_id IS NULL"),
+        ),
+        Index(
+            "uq_app_record_links_related_record_relationship",
+            "user_id",
+            "record_id",
+            "related_record_id",
+            "relation_type",
+            unique=True,
+            postgresql_where=text("target_app IS NULL"),
+            sqlite_where=text("target_app IS NULL"),
+        ),
+    )
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    record_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app_records.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    related_record_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app_records.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    target_app: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    relation_type: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    user: Mapped["User"] = relationship(lazy="selectin")

@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.infrastructure.storage_client import StorageServiceError, get_storage_client
 from app.models.brain_memory import BrainMemory, MemoryKind, MemorySource
 from app.models.personal_ai_brain import PersonalAIBrain
 from app.models.user import User
@@ -42,6 +43,15 @@ logger = get_logger(__name__)
 #: Maximum number of characters of an ingested item that Brain memory keeps.
 #: The complete content lives in the application record store.
 MEMORY_CONTENT_LIMIT = 1000
+QUERY_CONTEXT_RECORD_LIMIT = 4000
+
+
+class AppIngestionPersistenceError(Exception):
+    """The canonical application record could not be durably persisted."""
+
+
+class BrainRecordRetrievalError(Exception):
+    """A selected canonical record could not be retrieved for Brain context."""
 
 
 def _bounded_memory_content(normalized: NormalizedIngestion) -> str:
@@ -155,7 +165,7 @@ class PersonalBrainService:
         query: str,
         context: dict[str, Any] | None = None,
         *,
-        use_memory: bool = False,
+        use_memory: bool = True,
         persist_interaction: bool = False,
         memory_limit: int = 5,
     ) -> dict[str, Any]:
@@ -170,20 +180,80 @@ class PersonalBrainService:
             identity = await self.identity_repo.get_by_user_id(user.id)
 
         memories: list[BrainMemory] = []
+        records = []
         if use_memory and identity is not None:
             memories = await self._retrieve_memories(identity.id, query, memory_limit)
-            if not memories:
-                memories = await self.brain_memory_repo.get_recent_by_identity(identity.id, limit=memory_limit)
+            records = await self.app_record_repo.search_for_user(
+                user_id=user.id,
+                query=query,
+                limit=memory_limit,
+            )
 
-        enriched_context = dict(context or {})
+        record_contents: dict[uuid.UUID, str] = {}
+        for record in records:
+            if record.content is not None:
+                record_contents[record.id] = record.content
+            elif record.storage_type == "object" and record.object_reference:
+                try:
+                    record_contents[record.id] = await get_storage_client().read_text_object(
+                        owner_id=str(user.id),
+                        object_id=record.object_reference,
+                        max_bytes=200_000,
+                    )
+                except StorageServiceError as exc:
+                    raise BrainRecordRetrievalError(
+                        "A selected canonical record could not be retrieved."
+                    ) from exc
+            else:
+                raise BrainRecordRetrievalError(
+                    "A selected canonical record has no retrievable content."
+                )
+
+        reserved_context_keys = {
+            "authorized_memories",
+            "authorized_records",
+            "known_facts",
+            "relevant_memories",
+        }
+        enriched_context = {
+            key: value
+            for key, value in (context or {}).items()
+            if key not in reserved_context_keys
+        }
         if memories:
             enriched_context["relevant_memories"] = [
-                {"kind": mem.kind.value, "content": mem.content} for mem in memories
+                {
+                    "kind": mem.kind.value,
+                    "content": mem.content,
+                    "source_app": mem.source_app,
+                }
+                for mem in memories
+            ]
+            enriched_context["authorized_memories"] = [
+                {
+                    "id": str(mem.id),
+                    "kind": mem.kind.value,
+                    "source": mem.source.value,
+                    "source_app": mem.source_app,
+                    "content": mem.content,
+                }
+                for mem in memories
             ]
             # Only facts are forwarded as approved context; interpretations are
             # kept separate so the model does not treat them as ground truth.
             enriched_context["known_facts"] = [
                 mem.content for mem in memories if mem.kind == MemoryKind.FACT
+            ]
+        if records:
+            enriched_context["authorized_records"] = [
+                {
+                    "record_id": str(record.id),
+                    "source_app": record.destination_app,
+                    "record_type": record.record_type,
+                    "source_reference": record.source_reference,
+                    "content": _record_context_excerpt(record_contents[record.id], query),
+                }
+                for record in records
             ]
 
         prepared_context = await self.prepare_external_context(user, query, enriched_context)
@@ -216,8 +286,24 @@ class PersonalBrainService:
             "error_code": raw.get("error_code"),
             "minimal_external_context": prepared_context,
             "memories_used": [
-                {"id": mem.id, "kind": mem.kind.value, "source": mem.source.value, "content": mem.content}
+                {
+                    "id": mem.id,
+                    "kind": mem.kind.value,
+                    "source": mem.source.value,
+                    "content": mem.content,
+                    "source_app": mem.source_app,
+                }
                 for mem in memories
+            ],
+            "records_used": [
+                {
+                    "id": record.id,
+                    "source_app": record.destination_app,
+                    "record_type": record.record_type,
+                    "source_reference": record.source_reference,
+                    "content": _record_context_excerpt(record_contents[record.id], query),
+                }
+                for record in records
             ],
             "persisted_memory_id": persisted_memory_id,
         }
@@ -361,9 +447,10 @@ class PersonalBrainService:
 
         The write is idempotent when ``normalized.dedupe_key`` is set: a prior
         timeline event with the same ``(event_type, dedupe_key)`` short-circuits
-        the whole operation. The memory is committed first; the vault / knowledge
-        / timeline side effects follow and, if any of them fail, the primary
-        memory is preserved and ``partial`` is reported rather than raising.
+        the whole operation. Canonical app content is written before Brain
+        memory; failure to store it aborts ingestion. Vault / knowledge /
+        timeline side effects follow and, if any fail, the primary record and
+        memory are preserved and ``partial`` is reported rather than raising.
         """
         identity = await self.identity_repo.get_by_user_id(user.id)
         if identity is None:
@@ -402,13 +489,15 @@ class PersonalBrainService:
                     normalized=normalized,
                     source_app=source_app,
                 )
-            except Exception as exc:  # noqa: BLE001 - the memory must survive
-                partial = True
+            except Exception as exc:  # noqa: BLE001 - translate persistence failures safely
                 logger.warning(
-                    "Could not store the application record for app %s: %s",
+                    "Canonical record persistence failed for app %s: %s",
                     source_app,
                     type(exc).__name__,
                 )
+                raise AppIngestionPersistenceError(
+                    "The application record could not be durably stored"
+                ) from exc
             memory = await self.store_memory_for_user(
                 user,
                 content=_bounded_memory_content(normalized),
@@ -508,7 +597,7 @@ class PersonalBrainService:
                 source_reference=(
                     (normalized.vault or {}).get("object_reference")
                     if normalized.vault
-                    else None
+                    else normalized.dedupe_key
                 ),
                 retention_policy="default",
             )
@@ -707,3 +796,26 @@ def _metadata_memory_id(event_metadata: str | None) -> str | None:
         value = data.get("memory_id")
         return str(value) if value else None
     return None
+
+
+def _record_context_excerpt(content: str, query: str) -> str:
+    """Bound source-record text while centering an excerpt on query terms."""
+    if len(content) <= QUERY_CONTEXT_RECORD_LIMIT:
+        return content
+    terms = [
+        term
+        for term in query.casefold().split()
+        if len(term) > 1 and term not in {"what", "when", "where", "which", "who", "why", "how", "the", "is", "my"}
+    ]
+    content_lower = content.casefold()
+    match_positions = [content_lower.find(term) for term in terms]
+    match_positions = [position for position in match_positions if position >= 0]
+    center = min(match_positions) if match_positions else 0
+    start = max(0, center - QUERY_CONTEXT_RECORD_LIMIT // 4)
+    end = min(len(content), start + QUERY_CONTEXT_RECORD_LIMIT)
+    excerpt = content[start:end]
+    if start:
+        excerpt = "..." + excerpt
+    if end < len(content):
+        excerpt += "..."
+    return excerpt

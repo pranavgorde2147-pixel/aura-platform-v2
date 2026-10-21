@@ -164,9 +164,14 @@ def test_personal_brain_uses_provider_and_keeps_user_isolation():
             create=AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4())),
             commit=AsyncMock(),
         )
+        service._store_application_record = AsyncMock(return_value=str(uuid.uuid4()))
 
-        result_a = await service.process_query(user_a, "Should I go to the gym tonight?", {"schedule": "busy"})
-        result_b = await service.process_query(user_b, "Should I go to the gym tonight?", {"schedule": "free"})
+        result_a = await service.process_query(
+            user_a, "Should I go to the gym tonight?", {"schedule": "busy"}, use_memory=False
+        )
+        result_b = await service.process_query(
+            user_b, "Should I go to the gym tonight?", {"schedule": "free"}, use_memory=False
+        )
 
         assert result_a["user_id"] == str(user_a.id)
         assert result_b["user_id"] == str(user_b.id)

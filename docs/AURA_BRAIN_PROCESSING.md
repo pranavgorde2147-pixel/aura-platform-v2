@@ -59,7 +59,7 @@ Submit one input for understanding, routing and delivery.
 | `context` | object | `{}` | Extra context for the understanding layer (never trusted for authorization). |
 | `consent.memory_write` | bool | `false` | Allow this input to contribute to Brain memory. |
 | `consent.retain_source` | bool | `true` | Allow retention of the original content. |
-| `consent.cross_app_routing` | bool | `true` | Allow delivery to apps other than the source. |
+| `consent.cross_app_routing` | bool | `false` | Explicitly allow references/routing to apps other than the source. |
 | `use_memory` / `memory_limit` | bool / int | `true` / `5` | Whether existing memory may be consulted. |
 | `persist_memory` | bool | `false` | Explicit opt-in to write memory. |
 | `requested_destinations` | string[] | `[]` | Restrict delivery to these apps (still validated). |
@@ -227,6 +227,35 @@ These are deliberately different things.
   keeps the bounded summary. The `memory_id` in the response is unchanged for
   compatibility; `record_id` is the new field that points at the full record.
 
+### Shared record vault and cross-app references
+
+Routable source apps can retain one canonical source record with its original
+content, structured categories/topics, provenance, expiry policy, and
+processing status. Classification adds metadata without replacing that
+content. When the user explicitly opts in to cross-app routing, authorized
+destination apps receive an owner-scoped link to the canonical record instead
+of a duplicate copy. With `consent.retain_source=false`, legacy destination
+storage behavior applies; no canonical source record is created.
+
+The authenticated Server 1 `/api/v1/records` API provides list, search, detail,
+related-link, create-link, and delete operations. Every call supplies a
+`client_app`, which must be a registered active connection with the requested
+`records:read`, `records:write`, or `records:delete` grant. Each returned source
+also requires its own active `<source-app>:read` permission. Deletion requires
+both `records:delete` on the calling app and `<source-app>:delete` on the
+record's source. The authenticated user is always derived from JWT; request
+parameters cannot choose an owner. Cross-app links additionally require the
+destination app's registry-declared write permission. The API never grants
+these permissions automatically.
+
+List and search responses omit content unless `include_content=true`; fetching
+one record by ID returns its content. Object-backed records keep their original
+bytes in Server 2 storage and expose only the object reference through this
+API; retrieve them through the existing owner-scoped files proxy. Brain query
+retrieval can hydrate bounded text objects before sending them to inference;
+unreadable or unsupported selected objects produce an explicit service error,
+not an empty-content answer.
+
 ---
 
 ## 6. Idempotency, retries and duplicates
@@ -323,6 +352,13 @@ would be needed (`required_permission`).
 5. **Reconnect** after a transient failure with
    `POST /api/v1/brain/process/{id}/retry`.
 
+Cross-app routing defaults to off. An app must send
+`"consent":{"cross_app_routing":true}` for routing outside its source app, and
+each target still needs an active connection and its registry-declared write
+permission. A stable `input_id` or `Idempotency-Key` should be used for every
+retry. Reusing a `content_ref`/`input_id` for different content returns `409`
+rather than overwriting the source record.
+
 A minimal client call:
 
 ```bash
@@ -374,9 +410,10 @@ Server 2 keeps the understanding behaviour (`AURA_SKIP_MODEL_LOAD`,
 | `app_records` | The application-owned records, partitioned by destination and record type, with retention and provenance. |
 | `brain_memories` | Unchanged, plus `retention_policy` and `expires_at`. |
 
-Migration: `server1/alembic/versions/c4e8f1a2b7d9_add_brain_processing_pipeline.py`
-(revises `b7d4e1a9c2f3`). Roll out with `alembic upgrade head` before
-deploying the API.
+Migration: `server1/alembic/versions/e6a49cbd1731_add_shared_record_metadata_and_links.py`
+(revises `c4e8f1a2b7d9`). It adds structured metadata fields and the
+owner-scoped link table. Roll out with `alembic upgrade head` before deploying
+the API.
 
 ---
 

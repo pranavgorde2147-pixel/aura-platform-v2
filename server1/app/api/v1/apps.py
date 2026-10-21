@@ -35,7 +35,7 @@ from app.services.app_registry import (
     get_catalog_app,
     list_catalog,
 )
-from app.services.personal_brain import PersonalBrainService
+from app.services.personal_brain import AppIngestionPersistenceError, PersonalBrainService
 
 router = APIRouter(prefix="/apps", tags=["Apps"])
 
@@ -172,6 +172,10 @@ async def ingest_app_event(
     except AppIngestionError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+    except AppIngestionPersistenceError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
 
     if not result.get("accepted"):

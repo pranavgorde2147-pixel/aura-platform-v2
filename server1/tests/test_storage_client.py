@@ -6,6 +6,7 @@ No real network calls: the httpx client is replaced with a scripted fake.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 
 import httpx
 import pytest
@@ -15,6 +16,7 @@ from app.infrastructure import storage_client as storage_client_module
 from app.infrastructure.storage_client import (
     StorageClient,
     StorageConfigurationError,
+    StorageServiceError,
 )
 
 
@@ -133,3 +135,60 @@ def test_upload_requires_valid_url(monkeypatch):
                 content_type="text/plain",
             )
         )
+
+
+def _byte_stream(*chunks: bytes) -> AsyncIterator[bytes]:
+    async def _iterate() -> AsyncIterator[bytes]:
+        for chunk in chunks:
+            yield chunk
+
+    return _iterate()
+
+
+def test_read_text_object_returns_bounded_utf8_text(monkeypatch):
+    monkeypatch.setenv("STORAGE_SERVER_URL", "https://storage.example")
+    get_settings.cache_clear()
+    client = StorageClient()
+
+    async def stream_object(**kwargs):
+        assert kwargs == {"owner_id": "owner", "object_id": "record"}
+        return {"Content-Type": "text/plain; charset=utf-8"}, _byte_stream(
+            b"normal ", b"ization"
+        )
+
+    monkeypatch.setattr(client, "stream_object", stream_object)
+    result = asyncio.run(
+        client.read_text_object(owner_id="owner", object_id="record", max_bytes=32)
+    )
+
+    assert result == "normal ization"
+
+
+@pytest.mark.parametrize(
+    ("headers", "chunks", "max_bytes", "status_code"),
+    [
+        ({"Content-Type": "application/pdf"}, (b"pdf",), 10, 415),
+        ({"Content-Type": "text/plain"}, (b"too ", b"long"), 4, 413),
+        ({"Content-Type": "text/plain"}, (b"\xff",), 10, 415),
+    ],
+)
+def test_read_text_object_rejects_unsupported_or_oversized_content(
+    monkeypatch, headers, chunks, max_bytes, status_code
+):
+    monkeypatch.setenv("STORAGE_SERVER_URL", "https://storage.example")
+    get_settings.cache_clear()
+    client = StorageClient()
+
+    async def stream_object(**kwargs):
+        return headers, _byte_stream(*chunks)
+
+    monkeypatch.setattr(client, "stream_object", stream_object)
+    with pytest.raises(StorageServiceError) as exc:
+        asyncio.run(
+            client.read_text_object(
+                owner_id="owner",
+                object_id="record",
+                max_bytes=max_bytes,
+            )
+        )
+    assert exc.value.status_code == status_code

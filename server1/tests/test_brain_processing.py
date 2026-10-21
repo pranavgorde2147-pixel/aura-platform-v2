@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from app.models.brain_memory import MemoryKind
+from app.models.app_record import AppRecordLink
 from app.models.brain_processing import (
     BrainProcessingOperation,
     BrainProcessingRun,
@@ -61,6 +62,14 @@ class FakeConnections:
     async def get_connection_by_slug(self, user, slug):
         return self.modules.get(slug)
 
+    async def has_active_permission(self, user, slug, scope, action):
+        module = self.modules.get(slug)
+        return bool(
+            module
+            and module.is_active
+            and self.has_permission(module, scope, action)
+        )
+
     @staticmethod
     def has_permission(module, scope, action) -> bool:
         target = PermissionAction(action)
@@ -75,6 +84,7 @@ class FakeRecordRepository:
 
     def __init__(self) -> None:
         self.records: dict[tuple, SimpleNamespace] = {}
+        self.links: list[SimpleNamespace] = []
 
     def track(self, record) -> None:
         self.records[
@@ -83,6 +93,45 @@ class FakeRecordRepository:
 
     async def find_by_dedupe(self, *, user_id, destination_app, record_type, dedupe_key):
         return self.records.get((user_id, destination_app, record_type, dedupe_key))
+
+    async def get_for_user(self, *, user_id, record_id):
+        return next(
+            (record for record in self.records.values() if record.user_id == user_id and record.id == record_id),
+            None,
+        )
+
+    async def find_by_source_reference(self, *, user_id, source_app, source_reference):
+        return next(
+            (
+                record
+                for record in self.records.values()
+                if record.user_id == user_id
+                and record.destination_app == source_app
+                and record.source_reference == source_reference
+            ),
+            None,
+        )
+
+    async def find_app_link(self, *, user_id, record_id, target_app, relation_type):
+        return next(
+            (
+                link for link in self.links
+                if link.user_id == user_id and link.record_id == record_id
+                and link.target_app == target_app and link.relation_type == relation_type
+            ),
+            None,
+        )
+
+    async def find_record_link(self, *, user_id, record_id, related_record_id, relation_type):
+        return next(
+            (
+                link for link in self.links
+                if link.user_id == user_id and link.record_id == record_id
+                and link.related_record_id == related_record_id
+                and link.relation_type == relation_type
+            ),
+            None,
+        )
 
     async def list_by_run(self, run_id):
         return [record for record in self.records.values() if record.source_run_id == run_id]
@@ -101,6 +150,8 @@ class FakeSession:
         self.added.append(record)
         if self.repository is not None and hasattr(record, "dedupe_key"):
             self.repository.track(record)
+        if self.repository is not None and isinstance(record, AppRecordLink):
+            self.repository.links.append(record)
 
     async def flush(self) -> None:
         return None
@@ -634,6 +685,90 @@ def test_router_is_idempotent_for_the_same_idempotency_key():
     first, second = asyncio.run(_run())
     assert second.duplicate is True
     assert second.run.id == first.run.id
+
+
+def test_cross_app_routing_requires_explicit_consent_and_links_the_source_record():
+    async def _run(cross_app_routing: bool):
+        modules = [
+            FakeModule("diary", permissions=("memory:write", "diary:write")),
+            FakeModule("study", permissions=("memory:write", "study:write")),
+        ]
+        router, session = build_router(
+            modules=modules,
+            analysis_result=make_analysis(
+                [
+                    segment(
+                        category="lecture",
+                        record_type="lecture_note",
+                        text="A lecture captured in the diary app",
+                    )
+                ]
+            ),
+        )
+        outcome = await router.process(
+            make_user(),
+            ProcessingRequest(
+                content="A lecture captured in the diary app",
+                source_app="diary",
+                input_id=f"cross-app-{cross_app_routing}",
+                requested_destinations=["study"],
+                consent={"cross_app_routing": cross_app_routing},
+            ),
+        )
+        return outcome, session
+
+    denied, _ = asyncio.run(_run(False))
+    assert denied.operations[0].destination_app == "diary"
+    assert denied.operations[0].status is OperationStatus.SKIPPED
+    assert denied.source_record is not None
+
+    routed, session = asyncio.run(_run(True))
+    assert routed.operations[0].destination_app == "study"
+    assert routed.operations[0].status is OperationStatus.DELIVERED
+    assert routed.source_record is not None
+    assert routed.operations[0].record_reference == str(routed.source_record.id)
+    links = [item for item in session.added if isinstance(item, AppRecordLink)]
+    assert len(links) == 1
+    assert links[0].record_id == routed.source_record.id
+    assert links[0].target_app == "study"
+    assert len([item for item in session.added if hasattr(item, "dedupe_key")]) == 1
+
+
+def test_source_reference_cannot_be_reused_for_different_content():
+    from app.models.app_record import AppRecord
+    from app.services.brain_router import ProcessingError
+
+    async def _run():
+        router, _ = build_router(
+            modules=[FakeModule("diary", permissions=("memory:write", "diary:write"))],
+            analysis_result=make_analysis([segment()]),
+        )
+        user = make_user()
+        existing = AppRecord(
+            user_id=user.id,
+            destination_app="diary",
+            record_type="source_record",
+            content="The original content",
+            source_reference="upstream-1",
+            dedupe_key="old-key",
+        )
+        router.record_repo.track(existing)
+        with pytest.raises(ProcessingError) as exc:
+            await router._store_source_record(
+                user,
+                ProcessingRequest(
+                    content="Different content",
+                    source_app="diary",
+                    content_ref="upstream-1",
+                ),
+                SimpleNamespace(id=uuid.uuid4(), ai_identity_id=None),
+                make_analysis([segment()]),
+            )
+        return exc.value
+
+    error = asyncio.run(_run())
+    assert error.code == "source_reference_conflict"
+    assert error.status_code == 409
 
 
 def test_confirm_delivers_the_items_the_user_approved():

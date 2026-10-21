@@ -710,6 +710,284 @@ def test_core_apps_ingest_after_connection(client):
             assert body["memory_id"]
 
 
+@pytest.mark.integration
+def test_diary_record_is_retrieved_for_aura_core_query(client, monkeypatch):
+    email_a = f"diary-query-{uuid.uuid4().hex[:8]}@example.com"
+    email_b = f"diary-isolation-{uuid.uuid4().hex[:8]}@example.com"
+    _register(client, email_a)
+    _register(client, email_b)
+    headers_a = {"Authorization": f"Bearer {_login(client, email_a)['access_token']}"}
+    headers_b = {"Authorization": f"Bearer {_login(client, email_b)['access_token']}"}
+
+    for slug in ("diary", "aura-core"):
+        connected = client.post(
+            "/api/v1/apps/me", json={"module_slug": slug}, headers=headers_a
+        )
+        assert connected.status_code == 201, connected.text
+    client.post("/api/v1/apps/me", json={"module_slug": "aura-core"}, headers=headers_b)
+
+    entry = ("A regular note about my day. " * 8) + "My pet name is Sai."
+    saved = client.post(
+        "/api/v1/apps/diary/ingest",
+        json={"entry": entry, "external_id": "diary-pet-name-1"},
+        headers=headers_a,
+    )
+    assert saved.status_code == 201, saved.text
+    saved_body = saved.json()
+    assert saved_body["accepted"] is True
+    assert saved_body["record_id"]
+
+    class ContextAwareTestProvider:
+        def __init__(self):
+            self.context = None
+
+        async def prepare_external_context(self, user, query, context):
+            return {"user_id": str(user.id), "query": query}
+
+        async def process_query(self, user, query, context):
+            self.context = context
+            records = context.get("authorized_records", [])
+            found = any("my pet name is sai" in record["content"].lower() for record in records)
+            return {
+                "answer": "Your pet name is Sai." if found else "I do not know your pet name.",
+                "source": "integration_test",
+            }
+
+        async def personalize_response(self, user, answer, context):
+            return answer
+
+    provider = ContextAwareTestProvider()
+    from app.services.personal_brain import PersonalBrainService
+
+    monkeypatch.setattr(
+        "app.api.v1.brain.PersonalBrainService",
+        lambda session: PersonalBrainService(session, llm_provider=provider),
+    )
+
+    # Omit use_memory: Brain queries retrieve authorized memory/records by default.
+    answer = client.post(
+        "/api/v1/brain/query",
+        json={"query": "What is my pet name?", "source_app": "aura-core"},
+        headers=headers_a,
+    )
+    assert answer.status_code == 200, answer.text
+    body = answer.json()
+    assert "Sai" in body["answer"]
+    assert body["memories_used"] == []
+    assert len(body["records_used"]) == 1
+    assert body["records_used"][0]["id"] == saved_body["record_id"]
+    assert body["records_used"][0]["source_app"] == "diary"
+    assert body["records_used"][0]["source_reference"] == "diary-pet-name-1"
+    assert "My pet name is Sai." in body["records_used"][0]["content"]
+    assert provider.context["authorized_records"][0]["source_app"] == "diary"
+
+    # Same-user ownership filter applies regardless of source app or known record id.
+    other_user_answer = client.post(
+        "/api/v1/brain/query",
+        json={"query": "What is my pet name?", "source_app": "aura-core"},
+        headers=headers_b,
+    )
+    assert other_user_answer.status_code == 200, other_user_answer.text
+    assert other_user_answer.json()["records_used"] == []
+    assert "Sai" not in other_user_answer.json()["answer"]
+
+    unauthorized_query = client.post(
+        "/api/v1/brain/query",
+        json={"query": "What is my pet name?", "source_app": "notifications"},
+        headers=headers_a,
+    )
+    assert unauthorized_query.status_code == 403
+
+
+@pytest.mark.integration
+def test_diary_ingestion_reports_canonical_record_persistence_failure(client, monkeypatch):
+    email = f"diary-failure-{uuid.uuid4().hex[:8]}@example.com"
+    _register(client, email)
+    headers = {"Authorization": f"Bearer {_login(client, email)['access_token']}"}
+    connected = client.post(
+        "/api/v1/apps/me", json={"module_slug": "diary"}, headers=headers
+    )
+    assert connected.status_code == 201, connected.text
+
+    async def fail_record_write(*args, **kwargs):
+        raise RuntimeError("simulated database failure")
+
+    monkeypatch.setattr(
+        "app.services.personal_brain.PersonalBrainService._store_application_record",
+        fail_record_write,
+    )
+    response = client.post(
+        "/api/v1/apps/diary/ingest",
+        json={"entry": "My pet name is Sai."},
+        headers=headers,
+    )
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"] == "The application record could not be durably stored"
+
+
+@pytest.mark.integration
+def test_shared_record_api_enforces_source_permissions_and_links_without_copying(client):
+    email_a = f"shared-record-{uuid.uuid4().hex[:8]}@example.com"
+    email_b = f"shared-record-other-{uuid.uuid4().hex[:8]}@example.com"
+    _register(client, email_a)
+    _register(client, email_b)
+    headers_a = {"Authorization": f"Bearer {_login(client, email_a)['access_token']}"}
+    headers_b = {"Authorization": f"Bearer {_login(client, email_b)['access_token']}"}
+
+    diary_permissions = [
+        {"scope": "memory", "action": "write"},
+        {"scope": "diary", "action": "write"},
+        {"scope": "diary", "action": "read"},
+        {"scope": "diary", "action": "delete"},
+        {"scope": "records", "action": "delete"},
+    ]
+    core_permissions = [
+        {"scope": "brain", "action": "read"},
+        {"scope": "records", "action": "read"},
+        {"scope": "records", "action": "write"},
+        {"scope": "records", "action": "delete"},
+    ]
+    study_permissions = [
+        {"scope": "records", "action": "read"},
+        {"scope": "study", "action": "read"},
+        {"scope": "study", "action": "write"},
+    ]
+    connection_ids = {}
+    for slug, permissions in (
+        ("diary", diary_permissions),
+        ("aura-core", core_permissions),
+        ("study", study_permissions),
+    ):
+        connected = client.post(
+            "/api/v1/apps/me",
+            json={"module_slug": slug, "permissions": permissions},
+            headers=headers_a,
+        )
+        assert connected.status_code == 201, connected.text
+        connection_ids[slug] = connected.json()["id"]
+    core_b = client.post(
+        "/api/v1/apps/me",
+        json={"module_slug": "aura-core", "permissions": core_permissions},
+        headers=headers_b,
+    )
+    assert core_b.status_code == 201, core_b.text
+
+    saved = client.post(
+        "/api/v1/apps/diary/ingest",
+        json={"entry": "Professor explained database normalization.", "external_id": "shared-record-1"},
+        headers=headers_a,
+    )
+    assert saved.status_code == 201, saved.text
+    record_id = saved.json()["record_id"]
+
+    listing = client.get(
+        "/api/v1/records",
+        params={"client_app": "aura-core", "source_app": "diary"},
+        headers=headers_a,
+    )
+    assert listing.status_code == 200, listing.text
+    assert len(listing.json()) == 1
+    assert listing.json()[0]["id"] == record_id
+    assert listing.json()[0]["content"] is None
+    assert listing.json()[0]["source_app"] == "diary"
+
+    search = client.get(
+        "/api/v1/records/search",
+        params={"client_app": "aura-core", "q": "database normalization", "source_app": "diary"},
+        headers=headers_a,
+    )
+    assert search.status_code == 200, search.text
+    assert search.json()[0]["id"] == record_id
+
+    detail = client.get(
+        f"/api/v1/records/{record_id}",
+        params={"client_app": "aura-core"},
+        headers=headers_a,
+    )
+    assert detail.status_code == 200, detail.text
+    assert "Professor explained" in detail.json()["content"]
+
+    linked = client.put(
+        f"/api/v1/records/{record_id}/links",
+        params={"client_app": "aura-core"},
+        json={"target_app": "study", "relationship": "study_reference"},
+        headers=headers_a,
+    )
+    assert linked.status_code == 200, linked.text
+    duplicate_link = client.put(
+        f"/api/v1/records/{record_id}/links",
+        params={"client_app": "aura-core"},
+        json={"target_app": "study", "relationship": "study_reference"},
+        headers=headers_a,
+    )
+    assert duplicate_link.status_code == 200, duplicate_link.text
+    assert duplicate_link.json()["id"] == linked.json()["id"]
+
+    study_view = client.get(
+        "/api/v1/records",
+        params={"client_app": "study", "destination_app": "study"},
+        headers=headers_a,
+    )
+    assert study_view.status_code == 200, study_view.text
+    assert len(study_view.json()) == 1
+    assert study_view.json()[0]["id"] == record_id
+    assert study_view.json()[0]["source_app"] == "diary"
+
+    related = client.get(
+        f"/api/v1/records/{record_id}/related",
+        params={"client_app": "study"},
+        headers=headers_a,
+    )
+    assert related.status_code == 200, related.text
+    assert related.json()[0]["target_app"] == "study"
+
+    unauthorized_source = client.get(
+        "/api/v1/records",
+        params={"client_app": "aura-core", "source_app": "diary"},
+        headers=headers_b,
+    )
+    assert unauthorized_source.status_code == 403
+
+    diary_inactive = client.patch(
+        f"/api/v1/apps/me/{connection_ids['diary']}",
+        json={"is_active": False},
+        headers=headers_a,
+    )
+    assert diary_inactive.status_code == 200, diary_inactive.text
+    unavailable_record = client.get(
+        f"/api/v1/records/{record_id}",
+        params={"client_app": "aura-core"},
+        headers=headers_a,
+    )
+    assert unavailable_record.status_code == 404
+    diary_active = client.patch(
+        f"/api/v1/apps/me/{connection_ids['diary']}",
+        json={"is_active": True},
+        headers=headers_a,
+    )
+    assert diary_active.status_code == 200, diary_active.text
+
+    foreign = client.get(
+        f"/api/v1/records/{record_id}",
+        params={"client_app": "aura-core"},
+        headers=headers_b,
+    )
+    assert foreign.status_code == 404
+
+    deleted = client.delete(
+        f"/api/v1/records/{record_id}",
+        params={"client_app": "diary"},
+        headers=headers_a,
+    )
+    assert deleted.status_code == 204, deleted.text
+    after_delete = client.get(
+        f"/api/v1/records/{record_id}",
+        params={"client_app": "aura-core"},
+        headers=headers_a,
+    )
+    assert after_delete.status_code == 404
+
+
 # ------------------------------------------- universal brain processing
 
 def _fake_analysis_envelope(category: str, record_type: str, text: str, confidence: float) -> dict:

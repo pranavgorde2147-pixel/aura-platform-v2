@@ -10,6 +10,8 @@ import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import pytest
+
 from app.models.brain_memory import BrainMemory, MemoryKind, MemorySource
 from app.models.user import User
 from app.services.personal_brain import PersonalBrainService
@@ -75,7 +77,10 @@ def build_service(provider: FakeProvider, identity) -> tuple[PersonalBrainServic
     )
     service.identity_repo = SimpleNamespace(get_by_user_id=AsyncMock(return_value=identity))
     service.brain_memory_repo = memory_repo
-    service.app_record_repo = SimpleNamespace(find_by_dedupe=AsyncMock(return_value=None))
+    service.app_record_repo = SimpleNamespace(
+        find_by_dedupe=AsyncMock(return_value=None),
+        search_for_user=AsyncMock(return_value=[]),
+    )
     service.memory_repo = SimpleNamespace(
         upsert_for_identity=AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4())),
     )
@@ -131,7 +136,7 @@ def test_query_without_memory_does_not_read_or_persist():
         provider = FakeProvider()
         service, repo = build_service(provider, make_identity())
 
-        result = await service.process_query(make_user(), "hello")
+        result = await service.process_query(make_user(), "hello", use_memory=False)
 
         assert result["memories_used"] == []
         assert result["persisted_memory_id"] is None
@@ -159,6 +164,74 @@ def test_query_with_memory_keeps_facts_separate_from_interpretations():
     asyncio.run(_run())
 
 
+def test_query_hydrates_object_backed_records_before_calling_brain(monkeypatch):
+    async def _run():
+        provider = FakeProvider()
+        service, _ = build_service(provider, make_identity())
+        record = SimpleNamespace(
+            id=uuid.uuid4(),
+            destination_app="files",
+            record_type="document",
+            source_reference="object-1",
+            content=None,
+            storage_type="object",
+            object_reference="object-1",
+        )
+        service.app_record_repo.search_for_user = AsyncMock(return_value=[record])
+        storage = SimpleNamespace(
+            read_text_object=AsyncMock(return_value="The database lecture covered normalization.")
+        )
+        monkeypatch.setattr(
+            "app.services.personal_brain.get_storage_client", lambda: storage
+        )
+
+        result = await service.process_query(make_user(), "What did the lecture cover?")
+
+        assert result["records_used"][0]["content"] == (
+            "The database lecture covered normalization."
+        )
+        assert provider.last_context["authorized_records"][0]["source_app"] == "files"
+        storage.read_text_object.assert_awaited_once_with(
+            owner_id=str(service.app_record_repo.search_for_user.await_args.kwargs["user_id"]),
+            object_id="object-1",
+            max_bytes=200_000,
+        )
+
+    asyncio.run(_run())
+
+
+def test_query_fails_explicitly_when_object_backed_record_cannot_be_read(monkeypatch):
+    from app.infrastructure.storage_client import StorageServiceError
+    from app.services.personal_brain import BrainRecordRetrievalError
+
+    async def _run():
+        provider = FakeProvider()
+        service, _ = build_service(provider, make_identity())
+        record = SimpleNamespace(
+            id=uuid.uuid4(),
+            destination_app="files",
+            record_type="document",
+            source_reference="object-missing",
+            content=None,
+            storage_type="object",
+            object_reference="object-missing",
+        )
+        service.app_record_repo.search_for_user = AsyncMock(return_value=[record])
+        storage = SimpleNamespace(
+            read_text_object=AsyncMock(
+                side_effect=StorageServiceError("missing", status_code=404)
+            )
+        )
+        monkeypatch.setattr(
+            "app.services.personal_brain.get_storage_client", lambda: storage
+        )
+
+        with pytest.raises(BrainRecordRetrievalError):
+            await service.process_query(make_user(), "Find my document")
+
+    asyncio.run(_run())
+
+
 def test_query_persist_interaction_records_interpretation():
     async def _run():
         provider = FakeProvider()
@@ -166,7 +239,7 @@ def test_query_persist_interaction_records_interpretation():
         service, repo = build_service(provider, identity)
 
         result = await service.process_query(
-            make_user(), "Remember this", persist_interaction=True
+            make_user(), "Remember this", use_memory=False, persist_interaction=True
         )
 
         assert result["persisted_memory_id"] is not None

@@ -21,6 +21,7 @@ server-side.
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import uuid
 from dataclasses import dataclass, field
@@ -28,6 +29,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.app_record import AppRecord, AppRecordLink
 from app.models.brain_memory import BrainMemory, MemoryKind, MemorySource
 from app.models.brain_processing import (
     BrainProcessingOperation,
@@ -79,6 +81,7 @@ class ProcessingOutcome:
     run: BrainProcessingRun
     operations: list[BrainProcessingOperation] = field(default_factory=list)
     records: list[StoredRecord] = field(default_factory=list)
+    source_record: AppRecord | None = None
     memories: list[BrainMemory] = field(default_factory=list)
     # (segment index, memory) pairs so the API can report which item produced
     # which memory entry.
@@ -123,6 +126,15 @@ class BrainRouter:
     ) -> ProcessingOutcome:
         """Process one submitted input end to end."""
         key = (idempotency_key or request.idempotency_key or "").strip() or None
+        if key is None and request.input_id:
+            input_hash = hashlib.sha256(request.input_id.encode("utf-8")).hexdigest()
+            key = f"{request.source_app or 'unknown'}:{input_hash}"
+        if key is None and self.policy.idempotency_required:
+            raise ProcessingError(
+                "idempotency_key_required",
+                "Provide an Idempotency-Key header or stable input_id.",
+                status_code=422,
+            )
 
         source_auth = await self.resolver.authorize_source(user, request.source_app)
         if not source_auth.allowed:
@@ -132,12 +144,29 @@ class BrainRouter:
                 status_code=403 if source_auth.reason != "source_app_required" else 400,
             )
 
+        if request.related_record_ids and not await self.connections.has_active_permission(
+            user, request.source_app, scope="records", action="write"
+        ):
+            raise ProcessingError(
+                code="permission_missing",
+                message="The source application is missing the records:write permission.",
+                status_code=403,
+            )
+
         if key:
             existing = await self.run_repo.find_by_idempotency_key(
                 user_id=user.id,
                 idempotency_key=key,
             )
             if existing is not None:
+                if existing.content_summary != request.content.strip()[
+                    : self.policy.memory_summary_max_chars
+                ]:
+                    raise ProcessingError(
+                        "idempotency_key_conflict",
+                        "This idempotency key already identifies different content.",
+                        status_code=409,
+                    )
                 return await self._outcome(existing, duplicate=True)
 
         run = await self._create_run(user, request, key)
@@ -156,11 +185,187 @@ class BrainRouter:
         await self.session.flush()
 
         outcome = ProcessingOutcome(run=run, operations=operations, analysis=analysis)
+        if request.consent.retain_source:
+            outcome.source_record = await self._store_source_record(
+                user, request, run, analysis
+            )
+            if outcome.source_record is not None:
+                outcome.records.append(
+                    StoredRecord(
+                        record_id=outcome.source_record.id,
+                        storage_type=outcome.source_record.storage_type,
+                        object_reference=outcome.source_record.object_reference,
+                        created=outcome.source_record.source_run_id == run.id,
+                    )
+                )
+                await self._link_related_records(user, request, outcome.source_record)
         await self._deliver_ready(user, request, run, operations, outcome)
         await self._write_memories(user, request, run, analysis, outcome)
         await self._finalize_status(run, operations)
         await self.session.commit()
         return outcome
+
+    async def _store_source_record(
+        self,
+        user: User,
+        request: ProcessingRequest,
+        run: BrainProcessingRun,
+        analysis: AnalysisResult,
+    ) -> AppRecord | None:
+        """Keep one full source record and attach only server-produced metadata."""
+        app = get_catalog_app(request.source_app or "")
+        if app is None or not app.routable or app.storage_adapter == "none":
+            return None
+
+        source_reference = request.content_ref or request.input_id
+        record = None
+        if source_reference:
+            record = await self.record_repo.find_by_source_reference(
+                user_id=user.id,
+                source_app=app.slug,
+                source_reference=source_reference,
+            )
+            if record is not None:
+                existing_hash = (record.record_metadata or {}).get("source_content_sha256")
+                if (
+                    (record.content is not None and record.content != request.content)
+                    or (existing_hash is not None and existing_hash != hashlib.sha256(
+                        request.content.encode("utf-8")
+                    ).hexdigest())
+                    or (
+                        record.content is None
+                        and record.storage_type == "object"
+                        and existing_hash is None
+                    )
+                ):
+                    raise ProcessingError(
+                        "source_reference_conflict",
+                        "This source reference already identifies different or unverifiable content.",
+                        status_code=409,
+                    )
+
+        categories = list(dict.fromkeys(segment.category for segment in analysis.segments))
+        topics = list(
+            dict.fromkeys(topic for segment in analysis.segments for topic in segment.topics)
+        )
+        metadata = {
+            "source_content_sha256": hashlib.sha256(
+                request.content.encode("utf-8")
+            ).hexdigest(),
+            "analysis_mode": analysis.analysis_mode,
+            "confidence_kind": analysis.confidence_kind,
+            "segments": [
+                {
+                    "category": segment.category,
+                    "record_type": segment.record_type,
+                    "summary": segment.summary[:500],
+                    "confidence": segment.confidence,
+                    "entities": segment.entities[:50],
+                    "topics": segment.topics[:50],
+                    "occurred_at": (
+                        segment.occurred_at.isoformat() if segment.occurred_at else None
+                    ),
+                }
+                for segment in analysis.segments
+            ],
+        }
+        if record is not None:
+            changed = (
+                record.categories != categories
+                or record.topics != topics
+                or record.record_metadata != metadata
+            )
+            if changed:
+                record.categories = categories
+                record.topics = topics
+                record.record_metadata = metadata
+                record.version += 1
+            return record
+
+        dedupe_reference = source_reference or request.content
+        source_hash = hashlib.sha256(dedupe_reference.encode("utf-8")).hexdigest()
+        dedupe_key = f"{app.slug}:source:{source_hash}"
+        store = build_record_store(self.session, app.storage_adapter, self.record_repo)
+        try:
+            stored = await store.write(
+                RecordPayload(
+                    user_id=user.id,
+                    destination_app=app.slug,
+                    record_type="source_record",
+                    content=request.content,
+                    dedupe_key=dedupe_key,
+                    ai_identity_id=run.ai_identity_id,
+                    source_run_id=run.id,
+                    source_reference=source_reference or run.input_id,
+                    occurred_at=request.occurred_at,
+                    categories=categories,
+                    topics=topics,
+                    metadata=metadata,
+                    retention_policy="default",
+                )
+            )
+        except Exception as exc:
+            logger.warning(
+                "Canonical source record persistence failed for app %s: %s",
+                app.slug,
+                type(exc).__name__,
+            )
+            raise ProcessingError(
+                "source_record_storage_failed",
+                "The source record could not be durably stored.",
+                status_code=503,
+            ) from exc
+        record = await self.record_repo.get_for_user(
+            user_id=user.id, record_id=stored.record_id
+        )
+        if record is None:
+            raise ProcessingError(
+                "source_record_unavailable",
+                "The source record could not be loaded after storage.",
+                status_code=503,
+            )
+        return record
+
+    async def _link_related_records(
+        self, user: User, request: ProcessingRequest, source_record: AppRecord
+    ) -> None:
+        """Create idempotent owner-scoped links to caller-selected records."""
+        for raw_related_id in request.related_record_ids:
+            try:
+                related_id = uuid.UUID(raw_related_id)
+            except ValueError as exc:
+                raise ProcessingError(
+                    "invalid_related_record_id",
+                    "A related record identifier is invalid.",
+                    status_code=422,
+                ) from exc
+            if related_id == source_record.id:
+                continue
+            related = await self.record_repo.get_for_user(
+                user_id=user.id, record_id=related_id
+            )
+            if related is None:
+                raise ProcessingError(
+                    "related_record_not_found",
+                    "A related record was not found.",
+                    status_code=404,
+                )
+            existing = await self.record_repo.find_record_link(
+                user_id=user.id,
+                record_id=source_record.id,
+                related_record_id=related_id,
+                relation_type="related",
+            )
+            if existing is None:
+                self.session.add(
+                    AppRecordLink(
+                        user_id=user.id,
+                        record_id=source_record.id,
+                        related_record_id=related_id,
+                        relation_type="related",
+                    )
+                )
+        await self.session.flush()
 
     async def confirm(
         self,
@@ -185,7 +390,11 @@ class BrainRouter:
                 in (OperationStatus.AWAITING_REVIEW, OperationStatus.AWAITING_AUTHORIZATION)
             }
 
-        outcome = ProcessingOutcome(run=run, operations=operations)
+        outcome = ProcessingOutcome(
+            run=run,
+            operations=operations,
+            source_record=await self._source_record_for_run(run),
+        )
         request = ProcessingRequest(
             content=run.content_summary or " ",
             source_app=run.source_app,
@@ -197,29 +406,31 @@ class BrainRouter:
                 continue
             if operation.status == OperationStatus.DELIVERED:
                 continue
-            if operation.status == OperationStatus.AWAITING_AUTHORIZATION:
-                auth = await self.resolver.authorize_destination(
-                    user,
-                    operation.destination_app,
-                    operation.record_type,
-                )
-                if not auth.allowed:
-                    outcome.errors.append(
-                        {
-                            "code": auth.reason,
-                            "message": self._authorization_message(
-                                auth.reason, auth.required_permission
-                            ),
-                            "stage": "authorization",
-                        }
-                    )
-                    continue
             override = next((item for item in items if item.index == operation.segment_index), None)
             if override is not None:
                 if override.destination_app:
                     operation.destination_app = override.destination_app
                 if override.record_type:
                     operation.record_type = override.record_type
+            auth = await self.resolver.authorize_destination(
+                user,
+                operation.destination_app,
+                operation.record_type,
+            )
+            if not auth.allowed:
+                operation.status = OperationStatus.AWAITING_AUTHORIZATION
+                operation.error_code = auth.reason
+                operation.requires_review = True
+                outcome.errors.append(
+                    {
+                        "code": auth.reason,
+                        "message": self._authorization_message(
+                            auth.reason, auth.required_permission
+                        ),
+                        "stage": "authorization",
+                    }
+                )
+                continue
             operation.status = OperationStatus.READY
             operation.requires_review = False
             operation.requires_confirmation = False
@@ -239,7 +450,11 @@ class BrainRouter:
             raise ProcessingError("run_cancelled", "Processing run was cancelled", status_code=409)
 
         operations = await self.operation_repo.list_for_run(run.id)
-        outcome = ProcessingOutcome(run=run, operations=operations)
+        outcome = ProcessingOutcome(
+            run=run,
+            operations=operations,
+            source_record=await self._source_record_for_run(run),
+        )
         request = ProcessingRequest(
             content=run.content_summary or " ",
             source_app=run.source_app,
@@ -423,6 +638,7 @@ class BrainRouter:
             "summary": segment.summary,
             "rationale": segment.rationale,
             "entities": segment.entities,
+            "topics": segment.topics,
             "occurred_at": segment.occurred_at.isoformat() if segment.occurred_at else None,
             "text": segment.text[:MAX_OPERATION_TEXT_CHARS],
         }
@@ -470,7 +686,30 @@ class BrainRouter:
                 operation.error_code = "content_unavailable"
                 continue
 
+            if outcome.source_record is not None:
+                if operation.destination_app != outcome.source_record.destination_app:
+                    link = await self.record_repo.find_app_link(
+                        user_id=user.id,
+                        record_id=outcome.source_record.id,
+                        target_app=operation.destination_app,
+                        relation_type="classified_for",
+                    )
+                    if link is None:
+                        self.session.add(
+                            AppRecordLink(
+                                user_id=user.id,
+                                record_id=outcome.source_record.id,
+                                target_app=operation.destination_app,
+                                relation_type="classified_for",
+                            )
+                        )
+                operation.status = OperationStatus.DELIVERED
+                operation.error_code = None
+                operation.record_reference = str(outcome.source_record.id)
+                continue
+
             store = build_record_store(self.session, app.storage_adapter, self.record_repo)
+            segment_metadata = self._operation_metadata(operation)
             payload = RecordPayload(
                 user_id=user.id,
                 destination_app=operation.destination_app,
@@ -490,6 +729,15 @@ class BrainRouter:
                 source_segment_index=operation.segment_index,
                 source_reference=run.source_reference,
                 occurred_at=self._segment_occurred_at(operation) or run.occurred_at,
+                categories=[operation.category] if operation.category else [],
+                topics=list(segment_metadata.get("topics") or []),
+                metadata={
+                    "analysis_mode": run.analysis_mode,
+                    "confidence_kind": run.confidence_kind,
+                    "confidence": operation.confidence,
+                    "entities": list(segment_metadata.get("entities") or []),
+                    "rationale": segment_metadata.get("rationale"),
+                },
                 retention_policy="default",
             )
 
@@ -527,24 +775,24 @@ class BrainRouter:
             outcome.records.append(stored)
 
     @staticmethod
-    def _segment_summary(operation: BrainProcessingOperation) -> str | None:
+    def _operation_metadata(operation: BrainProcessingOperation) -> dict:
         if not operation.operation_metadata:
-            return None
+            return {}
         try:
             payload = json.loads(operation.operation_metadata)
         except (TypeError, ValueError):
-            return None
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _segment_summary(operation: BrainProcessingOperation) -> str | None:
+        payload = BrainRouter._operation_metadata(operation)
         summary = payload.get("summary")
         return summary[:500] if isinstance(summary, str) else None
 
     @staticmethod
     def _segment_occurred_at(operation: BrainProcessingOperation) -> datetime | None:
-        if not operation.operation_metadata:
-            return None
-        try:
-            payload = json.loads(operation.operation_metadata)
-        except (TypeError, ValueError):
-            return None
+        payload = BrainRouter._operation_metadata(operation)
         raw = payload.get("occurred_at")
         if not isinstance(raw, str):
             return None
@@ -658,6 +906,20 @@ class BrainRouter:
 
     async def _outcome(self, run: BrainProcessingRun, duplicate: bool = False) -> ProcessingOutcome:
         operations = await self.operation_repo.list_for_run(run.id)
+        source_record = await self._source_record_for_run(run)
+        if source_record is None:
+            for operation in operations:
+                if not operation.record_reference:
+                    continue
+                try:
+                    record_id = uuid.UUID(operation.record_reference)
+                except ValueError:
+                    continue
+                source_record = await self.record_repo.get_for_user(
+                    user_id=run.user_id, record_id=record_id
+                )
+                if source_record is not None:
+                    break
         records = [
             StoredRecord(
                 record_id=record.id,
@@ -667,7 +929,23 @@ class BrainRouter:
             )
             for record in await self.record_repo.list_by_run(run.id)
         ]
-        return ProcessingOutcome(run=run, operations=operations, records=records, duplicate=duplicate)
+        return ProcessingOutcome(
+            run=run,
+            operations=operations,
+            records=records,
+            source_record=source_record,
+            duplicate=duplicate,
+        )
+
+    async def _source_record_for_run(
+        self, run: BrainProcessingRun
+    ) -> AppRecord | None:
+        reference = run.source_reference or run.input_id
+        return await self.record_repo.find_by_source_reference(
+            user_id=run.user_id,
+            source_app=run.source_app,
+            source_reference=reference,
+        )
 
     @staticmethod
     def _authorization_message(reason: str, required_permission: str | None) -> str:

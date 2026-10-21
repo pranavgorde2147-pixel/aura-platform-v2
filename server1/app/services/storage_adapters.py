@@ -8,9 +8,9 @@ A destination application declares how its records are stored in the registry
     destination application and record type.
 
 ``object``
-    The record body is stored once in the object storage service (Server 3,
-    hosted inside Server 2) and ``app_records`` keeps only the metadata and a
-    pointer to the object. The full content is therefore never duplicated.
+    The record body is stored once in the object storage API on Server 2 and
+    ``app_records`` keeps only metadata and a pointer to the object. The full
+    content is therefore never duplicated.
 
 Both adapters are idempotent: the same ``dedupe_key`` for the same
 ``(user, destination, record type)`` always resolves to the same stored
@@ -24,6 +24,7 @@ import logging
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -60,6 +61,9 @@ class RecordPayload:
     source_segment_index: int | None = None
     source_reference: str | None = None
     occurred_at: datetime | None = None
+    categories: list[str] | None = None
+    topics: list[str] | None = None
+    metadata: dict[str, Any] | None = None
     retention_policy: str = "default"
 
 
@@ -129,6 +133,9 @@ class RelationalRecordStore(RecordStore):
             source_reference=payload.source_reference,
             dedupe_key=payload.dedupe_key,
             occurred_at=payload.occurred_at,
+            categories=list(payload.categories or []),
+            topics=list(payload.topics or []),
+            record_metadata=dict(payload.metadata or {}),
             retention_policy=payload.retention_policy,
             processing_status="stored",
         )
@@ -217,6 +224,9 @@ class ObjectRecordStore(RecordStore):
             source_reference=payload.source_reference,
             dedupe_key=payload.dedupe_key,
             occurred_at=payload.occurred_at,
+            categories=list(payload.categories or []),
+            topics=list(payload.topics or []),
+            record_metadata=dict(payload.metadata or {}),
             retention_policy=payload.retention_policy,
             processing_status="stored",
         )

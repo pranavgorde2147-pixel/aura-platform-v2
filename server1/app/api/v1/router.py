@@ -10,6 +10,7 @@ from app.api.v1.health import router as health_router
 from app.api.v1.users import router as users_router
 from app.api.v1.identity import router as identity_router
 from app.api.v1.processing import router as processing_router
+from app.api.v1.records import router as records_router
 
 api_router = APIRouter()
 api_router.include_router(health_router)
@@ -20,4 +21,4 @@ api_router.include_router(identity_router)
 api_router.include_router(files_router)
 api_router.include_router(apps_router)
 api_router.include_router(processing_router)
-
+api_router.include_router(records_router)

@@ -67,7 +67,7 @@ class ConsentOptions(BaseModel):
     # Whether the original content may be retained in object storage.
     retain_source: bool = True
     # Whether records may be routed to applications other than the source.
-    cross_app_routing: bool = True
+    cross_app_routing: bool = False
 
 
 class ProcessingRequest(BaseModel):
@@ -113,6 +113,7 @@ class ProcessedItem(BaseModel):
     # ``model`` or ``heuristic``. Heuristic scores are not calibrated.
     confidence_kind: str = "heuristic"
     entities: list[str] = Field(default_factory=list)
+    topics: list[str] = Field(default_factory=list)
     occurred_at: datetime | None = None
     # Reference back to the original input (run id or supplied reference).
     source_reference: str | None = None

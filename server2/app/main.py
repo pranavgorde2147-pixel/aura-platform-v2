@@ -418,6 +418,14 @@ def _build_messages(query: str, context: dict[str, Any]) -> tuple[str, str]:
     user_level = safe_context.get("user_level")
     relevant_context = safe_context.get("relevant_context", {})
     safety_constraints = safe_context.get("safety_constraints", [])
+    authorized_memories = _approved_context_entries(
+        safe_context.get("authorized_memories"),
+        ("id", "kind", "source", "source_app", "content"),
+    )
+    authorized_records = _approved_context_entries(
+        safe_context.get("authorized_records"),
+        ("record_id", "source_app", "record_type", "source_reference", "content"),
+    )
 
     if _skip_model_load() and _external_api_key() and _external_api_url():
         model_display = _external_model_name()
@@ -435,10 +443,36 @@ def _build_messages(query: str, context: dict[str, Any]) -> tuple[str, str]:
         context_lines.append(f"User level: {user_level}")
     if relevant_context:
         context_lines.append(f"Relevant context: {json.dumps(relevant_context, ensure_ascii=False, sort_keys=True)}")
+    if authorized_memories:
+        context_lines.append(
+            "Retrieved user memories (respect each memory's kind and source): "
+            + json.dumps(authorized_memories, ensure_ascii=False, sort_keys=True)
+        )
+    if authorized_records:
+        context_lines.append(
+            "Retrieved canonical user records (source app and record reference are authoritative): "
+            + json.dumps(authorized_records, ensure_ascii=False, sort_keys=True)
+        )
     if safety_constraints:
         context_lines.append(f"Safety constraints: {json.dumps(safety_constraints, ensure_ascii=False, sort_keys=True)}")
 
     return "\n".join(context_lines), query
+
+
+def _approved_context_entries(value: Any, keys: tuple[str, ...]) -> list[dict[str, Any]]:
+    """Keep only bounded, server-approved provenance fields for prompt context."""
+    if not isinstance(value, list):
+        return []
+    entries: list[dict[str, Any]] = []
+    for item in value[:25]:
+        if not isinstance(item, dict):
+            continue
+        entry = {key: item[key] for key in keys if key in item}
+        content = entry.get("content")
+        if isinstance(content, str):
+            entry["content"] = content[:4000]
+        entries.append(entry)
+    return entries
 
 
 def _build_prompt(query: str, context: dict[str, Any]) -> str:

@@ -167,6 +167,7 @@ def _build_response(outcome) -> ProcessingResponse:
                 confidence=primary.confidence,
                 confidence_kind=run.confidence_kind or "heuristic",
                 entities=list(metadata.get("entities") or []),
+                topics=list(metadata.get("topics") or []),
                 occurred_at=_parse_datetime(metadata.get("occurred_at")),
                 source_reference=run.source_reference or run.input_id,
                 destination_app=_primary_destination(group),

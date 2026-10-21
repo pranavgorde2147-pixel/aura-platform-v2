@@ -18,9 +18,9 @@ class BrainQueryRequest(BaseModel):
     # active connection to that app with the ``brain:read`` permission before
     # the request is forwarded to Server 2.
     source_app: str | None = Field(default=None, max_length=64)
-    # Retrieval and persistence are opt-in. Conversations are never saved
-    # automatically.
-    use_memory: bool = False
+    # Existing user memory is consulted by default. Callers may opt out for a
+    # stateless query; conversation persistence remains separately opt-in.
+    use_memory: bool = True
     persist_interaction: bool = False
     memory_limit: int = Field(default=5, ge=1, le=25)
 
@@ -31,6 +31,17 @@ class MemoryReference(BaseModel):
     id: uuid.UUID
     kind: str
     source: str
+    content: str
+    source_app: str | None = None
+
+
+class BrainRecordReference(BaseModel):
+    """A canonical app record used as context for a Brain query."""
+
+    id: uuid.UUID
+    source_app: str
+    record_type: str
+    source_reference: str | None = None
     content: str
 
 
@@ -52,6 +63,7 @@ class BrainQueryResponse(BaseModel):
     error_code: str | None = None
     # Distinguishes retrieved facts from AI generated text.
     memories_used: list[MemoryReference] = Field(default_factory=list)
+    records_used: list[BrainRecordReference] = Field(default_factory=list)
     persisted_memory_id: uuid.UUID | None = None
 
 

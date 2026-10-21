@@ -86,6 +86,7 @@ class AnalysisSegment:
     confidence: float
     rationale: str = ""
     entities: list[str] = field(default_factory=list)
+    topics: list[str] = field(default_factory=list)
     occurred_at: datetime | None = None
 
 
@@ -197,6 +198,8 @@ class ContentAnalysisService:
             record_type = record_type if record_type in VALID_RECORD_TYPES else "note"
             entities = item.get("entities")
             entities = [str(entity)[:200] for entity in entities] if isinstance(entities, list) else []
+            topics = item.get("topics")
+            topics = [str(topic)[:200] for topic in topics] if isinstance(topics, list) else []
             segments.append(
                 AnalysisSegment(
                     index=int(item.get("index", index)) if isinstance(item.get("index", index), int) else index,
@@ -207,6 +210,7 @@ class ContentAnalysisService:
                     confidence=self._coerce_confidence(item.get("confidence")),
                     rationale=str(item.get("rationale") or "")[:300],
                     entities=entities,
+                    topics=topics,
                     occurred_at=self._parse_datetime(item.get("occurred_at")),
                 )
             )

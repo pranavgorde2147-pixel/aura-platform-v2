@@ -5,6 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.main import _build_messages
 
 
 @pytest.fixture
@@ -127,3 +128,37 @@ def test_exact_model_name_is_required(client):
         headers={"Authorization": "Bearer test-token"},
     )
     assert response.status_code in {400, 422}
+
+
+def test_inference_prompt_includes_authorized_cross_app_records_and_memories():
+    system, query = _build_messages(
+        "What is my pet name?",
+        {
+            "authorized_memories": [
+                {
+                    "id": "memory-1",
+                    "kind": "interpretation",
+                    "source": "app",
+                    "source_app": "diary",
+                    "content": "My pet name is Sai.",
+                }
+            ],
+            "authorized_records": [
+                {
+                    "record_id": "record-1",
+                    "source_app": "diary",
+                    "record_type": "diary_entry",
+                    "source_reference": "diary-entry-42",
+                    "content": "My pet name is Sai.",
+                }
+            ],
+        },
+    )
+
+    assert query == "What is my pet name?"
+    assert "Retrieved user memories" in system
+    assert '"source_app": "diary"' in system
+    assert '"kind": "interpretation"' in system
+    assert "Retrieved canonical user records" in system
+    assert '"record_id": "record-1"' in system
+    assert "My pet name is Sai." in system

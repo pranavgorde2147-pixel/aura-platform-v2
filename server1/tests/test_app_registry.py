@@ -102,7 +102,12 @@ def test_aura_core_registry_requires_only_brain_read_for_queries():
     assert {
         (permission.scope, permission.action)
         for permission in aura_core.additional_permissions
-    } == {("identity", "read")}
+    } == {
+        ("identity", "read"),
+        ("records", "read"),
+        ("records", "write"),
+        ("records", "delete"),
+    }
 
 
 def test_catalog_endpoints_are_public():

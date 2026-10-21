@@ -232,6 +232,41 @@ class StorageClient:
 
         return headers, iterator()
 
+    async def read_text_object(
+        self,
+        *,
+        owner_id: str,
+        object_id: str,
+        max_bytes: int = 200_000,
+    ) -> str:
+        """Read a bounded UTF-8 text object for authorized Brain retrieval."""
+        headers, stream = await self.stream_object(owner_id=owner_id, object_id=object_id)
+        if not headers["Content-Type"].lower().startswith("text/"):
+            async for _ in stream:
+                pass
+            raise StorageServiceError("The referenced record is not text", status_code=415)
+        chunks: list[bytes] = []
+        total = 0
+        exceeds_limit = False
+        async for chunk in stream:
+            total += len(chunk)
+            if total > max_bytes:
+                exceeds_limit = True
+            elif not exceeds_limit:
+                chunks.append(chunk)
+        if exceeds_limit:
+            raise StorageServiceError(
+                "The referenced record exceeds the retrieval size limit",
+                status_code=413,
+            )
+        try:
+            return b"".join(chunks).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise StorageServiceError(
+                "The referenced record is not valid UTF-8 text",
+                status_code=415,
+            ) from exc
+
 
 def get_storage_client() -> StorageClient:
     """Return a StorageClient instance."""

@@ -164,7 +164,7 @@ Authentication: send `Authorization: Bearer <access_token>` on `(auth)` routes.
 ### Personal Brain (the user-facing brain)
 | Method | Path | Body | Notes |
 |--------|------|------|-------|
-| POST | `/brain/query` | `{query, context?, use_memory?, persist_interaction?, memory_limit?}` | Calls Server 2 |
+| POST | `/brain/query` | `{query, context?, use_memory=true, persist_interaction=false, memory_limit=5}` | Retrieves this user's authorized memories and app records by default, then calls Server 2; `use_memory=false` opts out |
 | POST | `/brain/ingest` | `{content, content_type?, source_app?, metadata?}` | Persists a `fact`; `source_app` requires an authorized app connection |
 | POST | `/brain/memory` | `{content, kind?, summary?, source_app?, importance?}` | 201; explicit memory |
 | GET | `/brain/memory?limit&offset` | – | list memories |
@@ -196,7 +196,8 @@ Supported ingestion slugs: `brain` (AURA Chat), `study`, `diary`, `meeting`,
   "model": "Qwen3.5-0.8B",
   "latency_ms": 1240,
   "tokens_used": 42,
-  "memories_used": [{"id": "...", "kind": "fact", "source": "user", "content": "..."}],
+  "memories_used": [{"id": "...", "kind": "fact", "source": "user", "source_app": "diary", "content": "..."}],
+  "records_used": [{"id": "...", "source_app": "diary", "record_type": "diary_entry", "source_reference": "...", "content": "..."}],
   "persisted_memory_id": null
 }
 ```
@@ -232,6 +233,30 @@ storage failures return **503**.
 
 Connections use `installed_modules` + `module_permissions` and are always scoped
 to the authenticated user.
+
+### Shared records (`/records`)
+
+The shared-record API is an owner-scoped vault over canonical `app_records`.
+Every route requires the user's Server 1 JWT and a registered, active
+`client_app` connection with the corresponding `records:read`, `records:write`,
+or `records:delete` grant. Reads are additionally limited to source apps for
+which that user has an active `<source-app>:read` grant. A request never
+supplies an owner ID.
+
+| Method | Path | Required query/body | Notes |
+|--------|------|---------------------|-------|
+| GET | `/records` | `client_app`; optional `source_app`, `destination_app`, `record_type`, `category`, `topic`, `occurred_after`, `occurred_before`, `include_content`, `limit`, `offset` | List readable records; content omitted unless requested |
+| GET | `/records/search` | `client_app`, `q`; optional source and metadata filters | Search readable relational content and metadata |
+| GET | `/records/{record_id}` | `client_app` | Fetch a readable record and its content |
+| GET | `/records/{record_id}/related` | `client_app` | List only links whose targets remain readable |
+| PUT | `/records/{record_id}/links` | `client_app`; `{"target_app":"study","relationship":"study_reference"}` or `{"related_record_id":"<uuid>","relationship":"related"}` | Add an idempotent reference; requires target app write authorization |
+| DELETE | `/records/{record_id}` | `client_app` | Delete only with vault delete grant and source app's `<source-app>:delete` grant |
+
+Optional `records:*` permissions are registry-approved but are not silently
+added to existing app connections. Update a connection with the authenticated
+`PATCH /apps/me/{module_id}` endpoint and its full desired permission list.
+Object-backed records return their object reference; retrieve original files
+through the authenticated `/files/{object_id}` API.
 
 ---
 
@@ -282,6 +307,8 @@ Alembic migrations in `server1/alembic/`; run `alembic upgrade head`.
 | `memory_vault` | references to stored objects |
 | `knowledge_graph` | graph nodes/edges |
 | `timeline` | activity events (e.g. `file.uploaded`) |
+| `app_records` | canonical app-owned content, structured metadata, provenance, retention and processing status |
+| `app_record_links` | owner-scoped references between canonical records and authorized destination apps |
 | `devices`, `installed_modules`, `module_permissions` | platform extensions |
 
 Server 2's storage API owns its own metadata table for stored objects (SQLite by

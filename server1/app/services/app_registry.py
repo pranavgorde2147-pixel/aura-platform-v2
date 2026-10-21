@@ -466,6 +466,24 @@ CATALOG: dict[str, AppDefinition] = {
     ),
 }
 
+for _catalog_app in CATALOG.values():
+    if not (_catalog_app.queries_brain or _catalog_app.routable):
+        continue
+    _catalog_app.additional_permissions.extend(
+        [
+            ModulePermissionSpec(scope="records", action="read"),
+            ModulePermissionSpec(scope="records", action="write"),
+            ModulePermissionSpec(scope="records", action="delete"),
+        ]
+    )
+    if _catalog_app.routable:
+        _catalog_app.additional_permissions.extend(
+            [
+                ModulePermissionSpec(scope=_catalog_app.slug, action="read"),
+                ModulePermissionSpec(scope=_catalog_app.slug, action="delete"),
+            ]
+        )
+
 
 def list_catalog() -> list[AppDefinition]:
     """Return the complete app catalog sorted by slug."""

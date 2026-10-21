@@ -24,7 +24,10 @@ from app.services.app_ingestion import (
     normalize_travel,
 )
 from app.services.brain_provider import MockPersonalBrainLLMProvider
-from app.services.personal_brain import PersonalBrainService
+from app.services.personal_brain import (
+    AppIngestionPersistenceError,
+    PersonalBrainService,
+)
 
 
 # ----------------------------------------------------------------- adapters
@@ -235,6 +238,25 @@ def test_record_ingestion_partial_failure_preserves_memory():
         assert result["partial"] is True
         assert result["memory_id"] is not None
         service.timeline_repo.rollback.assert_awaited()
+
+    asyncio.run(_run())
+
+
+def test_record_ingestion_fails_when_canonical_record_cannot_be_persisted():
+    async def _run():
+        user = make_user()
+        service = build_service(SimpleNamespace(id=uuid.uuid4()))
+        service._store_application_record = AsyncMock(side_effect=RuntimeError("database unavailable"))
+
+        with pytest.raises(AppIngestionPersistenceError):
+            await service.ingest_app_event(
+                user,
+                get_adapter("diary"),
+                {"entry": "My pet name is Sai"},
+            )
+
+        service.brain_memory_repo.create.assert_not_awaited()
+        service.timeline_repo.create.assert_not_awaited()
 
     asyncio.run(_run())
 
