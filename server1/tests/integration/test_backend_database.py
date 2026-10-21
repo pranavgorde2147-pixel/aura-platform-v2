@@ -387,3 +387,171 @@ def test_brain_ingest_without_object_leaves_vault_untouched(client):
     assert context["memory"]["object_reference"] is None
     assert context["knowledge"]["node_count"] >= 1
     assert context["recent_timeline_count"] >= 1
+
+
+CORE_APPS = ["study", "meeting", "health", "diary", "travel", "notifications"]
+
+
+# --------------------------------------------------- registry completeness
+
+@pytest.mark.integration
+def test_core_apps_are_registered_with_brain_read(client):
+    """Every required app is discoverable and declares a consistent capability."""
+    catalog = client.get("/api/v1/apps").json()
+    by_slug = {entry["slug"]: entry for entry in catalog}
+
+    for slug in CORE_APPS:
+        assert slug in by_slug, f"{slug} missing from catalog"
+        entry = by_slug[slug]
+        assert entry["name"] and entry["description"]
+
+        one = client.get(f"/api/v1/apps/{slug}")
+        assert one.status_code == 200
+        assert one.json()["slug"] == slug
+
+        if entry["queries_brain"]:
+            scopes = {(p["scope"], p["action"]) for p in entry["default_permissions"]}
+            assert ("brain", "read") in scopes, f"{slug} advertises queries_brain but lacks brain:read"
+
+    # Notification Hub records events but must not read the brain.
+    assert by_slug["notifications"]["queries_brain"] is False
+
+
+@pytest.mark.integration
+def test_catalog_registration_is_idempotent(client):
+    """Repeated catalog reads are stable: no duplicates, stable ordering."""
+    first = client.get("/api/v1/apps").json()
+    second = client.get("/api/v1/apps").json()
+    assert first == second
+    slugs = [entry["slug"] for entry in first]
+    assert len(slugs) == len(set(slugs))
+    assert slugs == sorted(slugs)
+
+
+# ------------------------------------------------- brain query authorization
+
+@pytest.mark.integration
+def test_brain_query_authorized_after_connecting_core_apps(client):
+    """Connecting an app grants brain:read, unblocking POST /brain/query."""
+    email = f"query-{uuid.uuid4().hex[:8]}@example.com"
+    _register(client, email)
+    headers = {"Authorization": f"Bearer {_login(client, email)['access_token']}"}
+
+    # Before connecting, a named source_app is rejected.
+    denied = client.post(
+        "/api/v1/brain/query",
+        json={"query": "hi", "source_app": "study"},
+        headers=headers,
+    )
+    assert denied.status_code == 403, denied.text
+
+    for slug in ("study", "meeting", "diary", "travel", "health"):
+        connect = client.post("/api/v1/apps/me", json={"module_slug": slug}, headers=headers)
+        assert connect.status_code == 201, connect.text
+
+        result = client.post(
+            "/api/v1/brain/query",
+            json={"query": f"status from {slug}", "source_app": slug},
+            headers=headers,
+        )
+        assert result.status_code == 200, result.text
+        assert result.json()["answer"]
+
+    # An app the user never connected still cannot query.
+    other = client.post(
+        "/api/v1/brain/query",
+        json={"query": "hi", "source_app": "search"},
+        headers=headers,
+    )
+    assert other.status_code == 403, other.text
+
+    # Connection endpoint reports the granted brain:read permission.
+    listing = client.get("/api/v1/apps/me", headers=headers).json()["items"]
+    study = next(item for item in listing if item["module_slug"] == "study")
+    assert any(p["scope"] == "brain" and p["action"] == "read" for p in study["permissions"])
+
+
+@pytest.mark.integration
+def test_deactivating_connection_blocks_brain_query(client):
+    email = f"deact-{uuid.uuid4().hex[:8]}@example.com"
+    _register(client, email)
+    headers = {"Authorization": f"Bearer {_login(client, email)['access_token']}"}
+
+    connect = client.post("/api/v1/apps/me", json={"module_slug": "study"}, headers=headers)
+    assert connect.status_code == 201
+    module_id = connect.json()["id"]
+
+    ok = client.post(
+        "/api/v1/brain/query", json={"query": "hi", "source_app": "study"}, headers=headers
+    )
+    assert ok.status_code == 200
+
+    off = client.patch(
+        f"/api/v1/apps/me/{module_id}", json={"is_active": False}, headers=headers
+    )
+    assert off.status_code == 200
+
+    blocked = client.post(
+        "/api/v1/brain/query", json={"query": "hi", "source_app": "study"}, headers=headers
+    )
+    assert blocked.status_code == 403, blocked.text
+
+
+@pytest.mark.integration
+def test_brain_query_authorization_is_user_scoped(client):
+    email_a = f"qa-{uuid.uuid4().hex[:8]}@example.com"
+    email_b = f"qb-{uuid.uuid4().hex[:8]}@example.com"
+    _register(client, email_a)
+    _register(client, email_b)
+    headers_a = {"Authorization": f"Bearer {_login(client, email_a)['access_token']}"}
+    headers_b = {"Authorization": f"Bearer {_login(client, email_b)['access_token']}"}
+
+    connect = client.post("/api/v1/apps/me", json={"module_slug": "meeting"}, headers=headers_a)
+    assert connect.status_code == 201
+
+    # User A can query via meeting; user B (no connection) cannot.
+    assert client.post(
+        "/api/v1/brain/query", json={"query": "hi", "source_app": "meeting"}, headers=headers_a
+    ).status_code == 200
+    assert client.post(
+        "/api/v1/brain/query", json={"query": "hi", "source_app": "meeting"}, headers=headers_b
+    ).status_code == 403
+
+
+# ------------------------------------------------------ ingest for six apps
+
+def _app_ingest_payload(slug: str) -> dict:
+    payloads = {
+        "study": {"notes": "Lecture on indexing", "external_id": f"study-{uuid.uuid4().hex[:6]}"},
+        "meeting": {"summary": "Roadmap sync", "external_id": f"meet-{uuid.uuid4().hex[:6]}"},
+        "health": {"content": "Ran 5k", "external_id": f"health-{uuid.uuid4().hex[:6]}"},
+        "diary": {"entry": "A calm day", "external_id": f"diary-{uuid.uuid4().hex[:6]}"},
+        "travel": {"destination": "Goa", "external_id": f"trip-{uuid.uuid4().hex[:6]}"},
+        "notifications": {"message": "Build ok", "external_id": f"notif-{uuid.uuid4().hex[:6]}"},
+    }
+    return payloads[slug]
+
+
+@pytest.mark.integration
+def test_core_apps_ingest_after_connection(client):
+    email = f"ing6-{uuid.uuid4().hex[:8]}@example.com"
+    _register(client, email)
+    headers = {"Authorization": f"Bearer {_login(client, email)['access_token']}"}
+
+    for slug in CORE_APPS:
+        connect = client.post("/api/v1/apps/me", json={"module_slug": slug}, headers=headers)
+        assert connect.status_code == 201, (slug, connect.text)
+
+        ingest = client.post(
+            f"/api/v1/apps/{slug}/ingest",
+            json=_app_ingest_payload(slug),
+            headers=headers,
+        )
+        assert ingest.status_code == 201, (slug, ingest.text)
+        body = ingest.json()
+        assert body["accepted"] is True and body["source_app"] == slug
+        # Notifications record an event without creating a memory.
+        if slug == "notifications":
+            assert body["memory_id"] is None
+        else:
+            assert body["memory_id"]

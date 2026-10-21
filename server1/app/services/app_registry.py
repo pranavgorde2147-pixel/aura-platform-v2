@@ -97,6 +97,7 @@ CATALOG: dict[str, AppDefinition] = {
         ingests=True,
         repo_path="server1/app/api/v1/brain.py",
         default_permissions=[
+            ModulePermissionSpec(scope="brain", action="read"),
             ModulePermissionSpec(scope="memory", action="read"),
             ModulePermissionSpec(scope="memory", action="write"),
         ],
@@ -132,6 +133,7 @@ CATALOG: dict[str, AppDefinition] = {
         queries_brain=True,
         ingests=True,
         default_permissions=[
+            ModulePermissionSpec(scope="brain", action="read"),
             ModulePermissionSpec(scope="memory", action="write"),
             ModulePermissionSpec(scope="files", action="write"),
         ],
@@ -149,6 +151,7 @@ CATALOG: dict[str, AppDefinition] = {
         queries_brain=True,
         ingests=True,
         default_permissions=[
+            ModulePermissionSpec(scope="brain", action="read"),
             ModulePermissionSpec(scope="memory", action="write"),
             ModulePermissionSpec(scope="timeline", action="write"),
         ],
@@ -166,6 +169,7 @@ CATALOG: dict[str, AppDefinition] = {
         queries_brain=True,
         ingests=True,
         default_permissions=[
+            ModulePermissionSpec(scope="brain", action="read"),
             ModulePermissionSpec(scope="memory", action="write"),
             ModulePermissionSpec(scope="timeline", action="write"),
         ],
@@ -183,6 +187,7 @@ CATALOG: dict[str, AppDefinition] = {
         queries_brain=True,
         ingests=True,
         default_permissions=[
+            ModulePermissionSpec(scope="brain", action="read"),
             ModulePermissionSpec(scope="memory", action="write"),
             ModulePermissionSpec(scope="files", action="write"),
         ],
@@ -200,6 +205,7 @@ CATALOG: dict[str, AppDefinition] = {
         queries_brain=True,
         ingests=True,
         default_permissions=[
+            ModulePermissionSpec(scope="brain", action="read"),
             ModulePermissionSpec(scope="memory", action="read"),
             ModulePermissionSpec(scope="memory", action="write"),
         ],
@@ -217,6 +223,7 @@ CATALOG: dict[str, AppDefinition] = {
         queries_brain=True,
         ingests=True,
         default_permissions=[
+            ModulePermissionSpec(scope="brain", action="read"),
             ModulePermissionSpec(scope="timeline", action="read"),
             ModulePermissionSpec(scope="timeline", action="write"),
         ],
@@ -251,6 +258,7 @@ CATALOG: dict[str, AppDefinition] = {
         queries_brain=True,
         ingests=True,
         default_permissions=[
+            ModulePermissionSpec(scope="brain", action="read"),
             ModulePermissionSpec(scope="workflow", action="read"),
             ModulePermissionSpec(scope="workflow", action="write"),
         ],
@@ -268,6 +276,7 @@ CATALOG: dict[str, AppDefinition] = {
         queries_brain=True,
         ingests=False,
         default_permissions=[
+            ModulePermissionSpec(scope="brain", action="read"),
             ModulePermissionSpec(scope="memory", action="read"),
             ModulePermissionSpec(scope="files", action="read"),
         ],
@@ -285,6 +294,7 @@ CATALOG: dict[str, AppDefinition] = {
         queries_brain=True,
         ingests=True,
         default_permissions=[
+            ModulePermissionSpec(scope="brain", action="read"),
             ModulePermissionSpec(scope="knowledge", action="read"),
             ModulePermissionSpec(scope="knowledge", action="write"),
         ],
@@ -302,6 +312,7 @@ CATALOG: dict[str, AppDefinition] = {
         queries_brain=True,
         ingests=True,
         default_permissions=[
+            ModulePermissionSpec(scope="brain", action="read"),
             ModulePermissionSpec(scope="knowledge", action="read"),
             ModulePermissionSpec(scope="timeline", action="write"),
         ],
@@ -319,6 +330,7 @@ CATALOG: dict[str, AppDefinition] = {
         queries_brain=True,
         ingests=True,
         default_permissions=[
+            ModulePermissionSpec(scope="brain", action="read"),
             ModulePermissionSpec(scope="memory", action="write"),
             ModulePermissionSpec(scope="notifications", action="read"),
         ],

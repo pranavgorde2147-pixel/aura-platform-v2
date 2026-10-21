@@ -267,6 +267,42 @@ def normalize_travel(payload: dict[str, Any]) -> NormalizedIngestion:
     )
 
 
+# -------------------------------------------------------------------- health
+
+def normalize_health(payload: dict[str, Any]) -> NormalizedIngestion:
+    """AURA Health: a user-consented wellness/health event.
+
+    Documented input (``sends_to_aura``): wellness events. Only recorded when
+    the user explicitly sends it through their authorized connection; health
+    data is never collected implicitly.
+    """
+    event = _optional_text(payload, "event", "metric", "activity", "type")
+    body = _require_text(payload, "content", "notes", "summary", "text", "message", "value")
+    occurred_at = _optional_text(payload, "occurred_at", "date", "timestamp")
+
+    content = f"{event}: {body}" if event and event not in body else body
+    labels = ["health"]
+    if event:
+        labels.append(f"health:{event.lower()}")
+    metadata = {
+        "event": event,
+        "value": payload.get("value"),
+        "unit": payload.get("unit"),
+        "occurred_at": occurred_at,
+        "raw": payload,
+    }
+    return NormalizedIngestion(
+        content=content,
+        kind=MemoryKind.FACT,
+        event_type="health.wellness_event",
+        summary=event or (body[:120] if body else None),
+        resource_type="wellness_event",
+        dedupe_key=_first_id(payload),
+        labels=tuple(labels),
+        metadata=metadata,
+    )
+
+
 # -------------------------------------------------------------- notifications
 
 def normalize_notification(payload: dict[str, Any]) -> NormalizedIngestion:
@@ -365,6 +401,13 @@ ADAPTERS: dict[str, AppAdapter] = {
         action="write",
         normalize=normalize_travel,
         description="Travel App trip records.",
+    ),
+    "health": AppAdapter(
+        slug="health",
+        scope="memory",
+        action="write",
+        normalize=normalize_health,
+        description="Health/Wellness consented wellness events.",
     ),
     "notifications": AppAdapter(
         slug="notifications",
