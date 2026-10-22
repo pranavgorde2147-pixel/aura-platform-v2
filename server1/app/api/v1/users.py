@@ -20,10 +20,85 @@ from app.repositories.ai_identity import AIIdentityRepository
 from app.repositories.personal_ai_brain import PersonalAIBrainRepository
 from app.schemas.user import UserCreate, UserResponse
 from app.schemas.brain import BrainProvisioningResponse
+from app.services.app_registry import AppConnectionService
 from app.services.user import DuplicateEmailError, UserCreationError, UserService
 
 logger = get_logger(__name__)
 router = APIRouter()
+
+
+async def _sync_brain_app_connections(session: AsyncSession, user: User) -> None:
+    """Refresh Server 2's app-consent snapshot from Server 1's source of truth."""
+    identity = await AIIdentityRepository(session).get_by_user_id(user.id)
+    brain = (
+        await PersonalAIBrainRepository(session).get_by_ai_identity_id(identity.id)
+        if identity
+        else None
+    )
+    if brain is None or brain.provisioning_status != "ready":
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The user's Brain must be ready before app permissions can sync.",
+        )
+
+    client = get_brain_client()
+    connections = await AppConnectionService(session).list_connections(user)
+    app_slugs = {connection.module_slug for connection in connections}
+    try:
+        remote = await asyncio.wait_for(
+            client.brain_app_request(
+                user_id=str(user.id),
+                brain_id=str(brain.id),
+                method="GET",
+            ),
+            timeout=5.0,
+        )
+        for connection in connections:
+            await asyncio.wait_for(
+                client.brain_app_request(
+                    user_id=str(user.id),
+                    brain_id=str(brain.id),
+                    method="PUT",
+                    json_body={
+                        "app_slug": connection.module_slug,
+                        "is_active": connection.is_active,
+                        "consent_state": (
+                            "granted" if connection.is_active else "suspended"
+                        ),
+                        "granted_scopes": [
+                            {
+                                "scope": permission.scope,
+                                "action": permission.permission.value,
+                            }
+                            for permission in connection.module_permissions
+                        ],
+                    },
+                ),
+                timeout=5.0,
+            )
+
+        for remote_connection in remote.get("items", []):
+            app_slug = remote_connection.get("app_slug")
+            if isinstance(app_slug, str) and app_slug not in app_slugs:
+                await asyncio.wait_for(
+                    client.brain_app_request(
+                        user_id=str(user.id),
+                        brain_id=str(brain.id),
+                        method="DELETE",
+                        app_slug=app_slug,
+                    ),
+                    timeout=5.0,
+                )
+    except (BrainServiceError, TimeoutError) as exc:
+        logger.warning(
+            "Brain app-permission sync failed for user %s (%s)",
+            user.id,
+            getattr(exc, "error_code", type(exc).__name__),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not synchronize the user's app permissions with their Brain.",
+        ) from exc
 
 
 async def _provision_primary_brain(session: AsyncSession, user: User) -> None:

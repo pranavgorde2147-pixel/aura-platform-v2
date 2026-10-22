@@ -310,6 +310,38 @@ def test_vault_request_forwards_owner_brain_and_cloudflare_headers(monkeypatch):
     asyncio.run(_run())
 
 
+def test_brain_app_request_targets_server2_consent_snapshot(monkeypatch):
+    async def _run():
+        configure(
+            monkeypatch,
+            AI_SERVER_URL="https://brain.example/",
+            INTERNAL_API_TOKEN="internal-token",
+        )
+        calls = install_client(monkeypatch, [FakeResponse(200, {"connection": {}})])
+        client = BrainClient()
+        owner_id, brain_id = str(uuid.uuid4()), str(uuid.uuid4())
+        payload = {
+            "app_slug": "aura-core",
+            "is_active": True,
+            "consent_state": "granted",
+            "granted_scopes": [{"scope": "brain", "action": "read"}],
+        }
+
+        result = await client.brain_app_request(
+            user_id=owner_id,
+            brain_id=brain_id,
+            method="PUT",
+            json_body=payload,
+        )
+
+        assert result == {"connection": {}}
+        assert calls[0]["url"] == f"https://brain.example/v1/brains/{brain_id}/apps"
+        assert calls[0]["json"] == payload
+        assert calls[0]["headers"]["X-Aura-Owner-Id"] == owner_id
+
+    asyncio.run(_run())
+
+
 def test_errors_do_not_leak_response_body_or_network_details(monkeypatch):
     async def _run():
         configure(

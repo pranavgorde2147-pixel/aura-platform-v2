@@ -123,9 +123,13 @@ async def reconcile_my_brain(
     session: AsyncSession = Depends(get_db),
 ) -> BrainProvisioningResponse:
     """Retry idempotent Server 2 registration for this authenticated owner."""
-    from app.api.v1.users import _provision_primary_brain
+    from app.api.v1.users import (
+        _provision_primary_brain,
+        _sync_brain_app_connections,
+    )
 
     await _provision_primary_brain(session, current_user)
+    await _sync_brain_app_connections(session, current_user)
     return await my_brain(current_user=current_user, session=session)
 
 

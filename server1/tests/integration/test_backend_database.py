@@ -126,8 +126,15 @@ def test_owner_can_reconcile_existing_brain_without_replacing_identity(
     before = client.get("/api/v1/brain/me", headers=headers)
     assert before.status_code == 200
     assert before.json()["provisioning_status"] == "pending"
+    connected = client.post(
+        "/api/v1/apps/me",
+        headers=headers,
+        json={"module_slug": "aura-core"},
+    )
+    assert connected.status_code == 201, connected.text
 
     calls = []
+    app_calls = []
 
     class FakeBrainClient:
         async def provision_brain(self, **kwargs):
@@ -165,6 +172,12 @@ def test_owner_can_reconcile_existing_brain_without_replacing_identity(
                 "last_health_check": "2026-10-22T00:00:00+00:00",
             }
 
+        async def brain_app_request(self, **kwargs):
+            app_calls.append(kwargs)
+            if kwargs["method"] == "GET":
+                return {"items": []}
+            return {"connection": {}}
+
     monkeypatch.setattr(
         users_module,
         "get_settings",
@@ -180,6 +193,13 @@ def test_owner_can_reconcile_existing_brain_without_replacing_identity(
     assert reconciled.json()["brain_id"] == before.json()["brain_id"]
     assert reconciled.json()["ai_identity_id"] == before.json()["ai_identity_id"]
     assert calls[0]["model_id"] == before.json()["model_configuration"]["model_id"]
+    assert [call["method"] for call in app_calls] == ["GET", "PUT"]
+    assert app_calls[1]["json_body"] == {
+        "app_slug": "aura-core",
+        "is_active": True,
+        "consent_state": "granted",
+        "granted_scopes": [{"scope": "brain", "action": "read"}],
+    }
     # The dedicated runtime assigned by Server 2 is projected onto the owner's
     # Brain row and reported back to the owner.
     assert reconciled.json()["llm_runtime_id"]

@@ -21,6 +21,7 @@ import asyncio
 import logging
 import uuid
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -342,6 +343,68 @@ class BrainClient:
         if not isinstance(result, dict):
             raise BrainServiceError(
                 "vault_invalid_response", "AURA Brain storage returned invalid data"
+            )
+        return result
+
+    async def brain_app_request(
+        self,
+        *,
+        user_id: str,
+        brain_id: str,
+        method: str,
+        app_slug: str | None = None,
+        json_body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Synchronize one connected-app consent snapshot with Server 2."""
+        request_id = str(uuid.uuid4())
+        headers = self._headers(user_id, request_id)
+        path = f"/v1/brains/{brain_id}/apps"
+        if app_slug is not None:
+            path += f"/{quote(app_slug, safe='')}"
+        try:
+            async with httpx.AsyncClient(
+                timeout=self.timeout,
+                verify=self.verify_tls,
+            ) as client:
+                response = await client.request(
+                    method.upper(),
+                    f"{self.base_url}{path}",
+                    json=json_body,
+                    headers=headers,
+                )
+        except httpx.TimeoutException as exc:
+            raise BrainServiceError(
+                "brain_apps_timeout", "AURA Brain app authorization sync timed out"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise BrainServiceError(
+                "brain_apps_unreachable",
+                "AURA Brain app authorization service is unavailable",
+            ) from exc
+
+        if response.status_code >= 400:
+            logger.warning(
+                "Server 2 app authorization sync failed with HTTP %s",
+                response.status_code,
+            )
+            raise BrainServiceError(
+                "brain_apps_rejected",
+                "AURA Brain rejected the app authorization sync",
+                response.status_code,
+            )
+        if response.status_code == 204 or not response.content:
+            return {}
+        try:
+            result = response.json()
+        except ValueError as exc:
+            raise BrainServiceError(
+                "brain_apps_invalid_response",
+                "AURA Brain app authorization service returned invalid data",
+            ) from exc
+        if not isinstance(result, dict):
+            raise BrainServiceError(
+                "brain_apps_invalid_response",
+                "AURA Brain app authorization service returned invalid data",
             )
         return result
 
