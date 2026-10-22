@@ -49,6 +49,7 @@ async def _provision_primary_brain(session: AsyncSession, user: User) -> None:
                 brain_id=str(brain.id),
                 owner_id=str(user.id),
                 ai_identity_id=str(identity.id),
+                owner_name=identity.display_name or user.full_name,
                 model_id=configured_model,
                 max_concurrent_requests=int(
                     brain.compute_allocation.get("max_concurrent_requests", 1)

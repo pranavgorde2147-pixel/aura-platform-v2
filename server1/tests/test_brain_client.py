@@ -113,6 +113,30 @@ def test_infer_forwards_identity_model_and_headers(monkeypatch):
     asyncio.run(_run())
 
 
+def test_provision_forwards_brain_owner_name(monkeypatch):
+    async def _run():
+        configure(
+            monkeypatch,
+            AI_SERVER_URL="https://brain.example",
+            INTERNAL_API_TOKEN="internal-token",
+        )
+        calls = install_client(monkeypatch, [FakeResponse(200, {"brain_id": "brain"})])
+        client = BrainClient()
+
+        await client.provision_brain(
+            brain_id=str(uuid.uuid4()),
+            owner_id=str(uuid.uuid4()),
+            ai_identity_id=str(uuid.uuid4()),
+            owner_name="Avery Example",
+            model_id="Qwen3.5-0.8B",
+        )
+
+        assert calls[0]["json"]["owner_name"] == "Avery Example"
+        assert "owner_name" not in calls[0]["headers"]
+
+    asyncio.run(_run())
+
+
 def test_auth_failure_is_not_retried(monkeypatch):
     async def _run():
         configure(

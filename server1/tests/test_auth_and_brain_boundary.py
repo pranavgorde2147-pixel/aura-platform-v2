@@ -211,6 +211,7 @@ def test_user_registration_binds_single_identity_and_brain():
         assert created.email == "new-user@example.com"
         assert service.identity_repo.create.await_count == 1
         assert service.brain_repo.create.await_count == 1
+        assert service.brain_repo.create.await_args.kwargs["brain_name"] == "New User"
 
     asyncio.run(_run())
 

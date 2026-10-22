@@ -225,6 +225,7 @@ class BrainClient:
         brain_id: str,
         owner_id: str,
         ai_identity_id: str,
+        owner_name: str | None = None,
         model_id: str,
         max_concurrent_requests: int = 1,
     ) -> dict[str, Any]:
@@ -237,6 +238,8 @@ class BrainClient:
             "resource_manifest_version": 1,
             "max_concurrent_requests": max_concurrent_requests,
         }
+        if owner_name is not None:
+            payload["owner_name"] = owner_name
         request_id = str(uuid.uuid4())
         headers = self._headers(owner_id, request_id)
         return await self._post_json(

@@ -68,14 +68,15 @@ class UserService:
                 full_name=full_name,
                 is_active=True,
             )
+            brain_name = full_name or f"AURA-{user.email.split('@', 1)[0]}"
             identity = await self.identity_repo.create(
                 user_id=user.id,
-                display_name=full_name or f"AURA-{user.email.split('@', 1)[0]}",
+                display_name=brain_name,
                 is_default=True,
             )
             brain = await self.brain_repo.create(
                 ai_identity_id=identity.id,
-                brain_name=full_name or "Personal Brain",
+                brain_name=brain_name,
                 version="1.0",
                 state="initializing",
                 provisioning_status="pending",
