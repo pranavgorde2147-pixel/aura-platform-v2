@@ -13,15 +13,16 @@ class BrainQueryRequest(BaseModel):
     """Request sent from an application to the user's Personal Brain."""
 
     query: str = Field(..., min_length=1, max_length=5000)
+    request_id: uuid.UUID | None = None
     context: dict[str, Any] | None = None
     # Optional originating app slug. When supplied, the caller must have an
     # active connection to that app with the ``brain:read`` permission before
     # the request is forwarded to Server 2.
     source_app: str | None = Field(default=None, max_length=64)
-    # Existing user memory is consulted by default. Callers may opt out for a
-    # stateless query; conversation persistence remains separately opt-in.
+    # Personal vault retrieval is enabled by default.
     use_memory: bool = True
-    persist_interaction: bool = False
+    # Persist the user query and Brain answer by default; callers may opt out.
+    persist_interaction: bool = True
     memory_limit: int = Field(default=5, ge=1, le=25)
 
 
@@ -49,6 +50,7 @@ class BrainQueryResponse(BaseModel):
     """Response returned by the Personal Brain after processing a query."""
 
     answer: str
+    request_id: uuid.UUID | None = None
     # Provider that produced the answer. Real values include ``server2_brain``,
     # ``server2_test_mode``, ``external_fallback``, or ``server2_error``; the
     # ``mock_*`` values are development-only and never indicate real inference.
@@ -65,6 +67,7 @@ class BrainQueryResponse(BaseModel):
     memories_used: list[MemoryReference] = Field(default_factory=list)
     records_used: list[BrainRecordReference] = Field(default_factory=list)
     persisted_memory_id: uuid.UUID | None = None
+    persisted_record_id: uuid.UUID | None = None
 
 
 class BrainProvisioningResponse(BaseModel):
@@ -139,3 +142,4 @@ class MemoryUpdateRequest(BaseModel):
     content: str | None = Field(default=None, min_length=1, max_length=20000)
     summary: str | None = Field(default=None, max_length=512)
     importance: int | None = Field(default=None, ge=0, le=100)
+    confirm_original_edit: bool = False

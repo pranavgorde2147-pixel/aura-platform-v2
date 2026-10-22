@@ -63,6 +63,8 @@ class StorageClient:
         self.base_url = _normalize_base_url(settings.storage_server_url)
         self.token = settings.effective_storage_token
         self.timeout = settings.storage_request_timeout_seconds
+        self.access_client_id = settings.ai_access_client_id
+        self.access_client_secret = settings.ai_access_client_secret
         error = _validate_base_url(self.base_url)
         if error:
             logger.warning("Storage configuration invalid: %s", error)
@@ -77,12 +79,22 @@ class StorageClient:
         headers = {"X-Aura-Owner-Id": str(owner_id)}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
+        headers.update(self._access_headers())
         return headers
 
     def _auth_headers(self) -> dict[str, str]:
-        if self.token:
-            return {"Authorization": f"Bearer {self.token}"}
-        return {}
+        headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
+        headers.update(self._access_headers())
+        return headers
+
+    def _access_headers(self) -> dict[str, str]:
+        """Add Cloudflare Access service credentials when fully configured."""
+        if not self.access_client_id or not self.access_client_secret:
+            return {}
+        return {
+            "CF-Access-Client-Id": self.access_client_id,
+            "CF-Access-Client-Secret": self.access_client_secret,
+        }
 
     async def health_check(self) -> dict[str, Any] | None:
         """Return storage readiness JSON, or None if unreachable.

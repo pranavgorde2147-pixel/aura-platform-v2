@@ -16,16 +16,20 @@ Security properties enforced here:
 from __future__ import annotations
 
 import json
+import hashlib
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies.auth import get_current_user
 from app.infrastructure.database.session import get_db
+from app.infrastructure.brain_client import BrainServiceError, get_brain_client
 from app.models.brain_processing import BrainProcessingOperation, OperationStatus
 from app.models.user import User
+from app.repositories.ai_identity import AIIdentityRepository
+from app.repositories.personal_ai_brain import PersonalAIBrainRepository
 from app.schemas.processing import (
     AuthorizationOutcome,
     ClassificationSummary,
@@ -39,8 +43,7 @@ from app.schemas.processing import (
     ProcessingResponse,
     RecordReference,
 )
-from app.services.brain_router import BrainRouter, ProcessingError as RouterProcessingError
-from app.services.app_registry import get_catalog_app
+from app.services.app_registry import AppConnectionService, get_catalog_app
 from app.services.classification_policy import ClassificationPolicy
 
 router = APIRouter(prefix="/brain/process", tags=["Brain"])
@@ -60,31 +63,297 @@ async def process_input(
     outcome. Items that were not confident enough to be delivered automatically
     are returned with ``requires_review`` so the client can ask the user.
     """
-    router_service = BrainRouter(session)
+    source_app = payload.source_app or "brain"
+    app = get_catalog_app(source_app)
+    if app is None:
+        raise HTTPException(status_code=404, detail="Unknown source application")
+    if payload.source_app and not await AppConnectionService(session).has_active_permission(
+        current_user, source_app, "memory", "write"
+    ):
+        raise HTTPException(status_code=403, detail="Source app is not authorized to write")
+    identity = await AIIdentityRepository(session).get_by_user_id(current_user.id)
+    brain = (
+        await PersonalAIBrainRepository(session).get_by_ai_identity_id(identity.id)
+        if identity
+        else None
+    )
+    if brain is None or brain.provisioning_status != "ready":
+        raise HTTPException(status_code=503, detail="Personal Brain is not ready")
+
+    client = get_brain_client()
+    operation_key = idempotency_key or payload.idempotency_key or str(uuid.uuid4())
+    key_hash = hashlib.sha256(operation_key.encode("utf-8")).hexdigest()
+    processing_id = uuid.uuid5(current_user.id, key_hash)
+    request_id = str(uuid.uuid4())
+    requested_destinations = sorted(set(payload.requested_destinations))
+    unknown_destinations = [
+        destination
+        for destination in requested_destinations
+        if get_catalog_app(destination) is None
+    ]
+    if unknown_destinations:
+        raise HTTPException(status_code=422, detail="Unknown requested destination")
+    blocked_destinations = [
+        destination
+        for destination in requested_destinations
+        if destination != source_app
+    ]
     try:
-        outcome = await router_service.process(
-            current_user,
-            payload,
-            idempotency_key=idempotency_key,
+        analysis = await client.analyze(
+            user_id=str(current_user.id),
+            content=payload.content,
+            context=payload.context,
+            source_app=source_app,
+            language=payload.language,
+            request_id=request_id,
         )
-    except RouterProcessingError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
-    return _build_response(outcome)
+        segments = analysis.get("segments")
+        if not isinstance(segments, list) or not segments:
+            raise BrainServiceError(
+                "brain_invalid_response", "AURA Brain returned no classified segments"
+            )
+        items: list[ProcessedItem] = []
+        records: list[RecordReference] = []
+        deliveries: list[DeliveryOutcome] = []
+        for index, segment in enumerate(segments):
+            if not isinstance(segment, dict):
+                continue
+            content = str(segment.get("text") or payload.content)
+            record = await client.vault_request(
+                user_id=str(current_user.id),
+                brain_id=str(brain.id),
+                method="POST",
+                path="records",
+                json_body={
+                    "record_type": str(segment.get("record_type") or payload.input_type)[:64],
+                    "namespace": f"apps/{source_app}",
+                    "idempotency_key": f"process:{key_hash}:{index}",
+                    "title": str(segment.get("summary") or content[:120])[:512],
+                    "content": content,
+                    "source_app": source_app,
+                    "source_reference": str(processing_id),
+                    "metadata": {
+                        "processing_id": str(processing_id),
+                        "segment_index": index,
+                        "input_id": payload.input_id,
+                        "input_type": payload.input_type,
+                        "category": segment.get("category"),
+                        "summary": segment.get("summary"),
+                        "topics": segment.get("topics") or [],
+                        "entities": segment.get("entities") or [],
+                        "occurred_at": segment.get("occurred_at"),
+                        "confidence": segment.get("confidence"),
+                        "confidence_kind": analysis.get("confidence_kind", "heuristic"),
+                        "analysis_mode": analysis.get("analysis_mode", "deterministic"),
+                        "blocked_destinations": blocked_destinations,
+                        "is_original": True,
+                    },
+                },
+            )
+            record_id = str(record["record_id"])
+            items.append(
+                ProcessedItem(
+                    index=len(items),
+                    category=str(segment.get("category") or "unclassified"),
+                    record_type=str(segment.get("record_type") or payload.input_type),
+                    summary=str(segment.get("summary") or content[:200])[:500],
+                    confidence=max(0.0, min(1.0, float(segment.get("confidence") or 0))),
+                    confidence_kind=str(analysis.get("confidence_kind") or "heuristic"),
+                    entities=list(segment.get("entities") or []),
+                    topics=list(segment.get("topics") or []),
+                    occurred_at=segment.get("occurred_at"),
+                    source_reference=str(processing_id),
+                    destination_app=source_app,
+                    status="delivered",
+                )
+            )
+            records.append(
+                RecordReference(
+                    destination_app=source_app,
+                    record_type=str(segment.get("record_type") or payload.input_type),
+                    record_id=record_id,
+                    storage_type="brain_vault",
+                )
+            )
+            deliveries.append(
+                DeliveryOutcome(
+                    destination_app=source_app,
+                    record_type=str(segment.get("record_type") or payload.input_type),
+                    status="delivered",
+                    record_reference=record_id,
+                    attempts=1,
+                )
+            )
+    except BrainServiceError as exc:
+        status_code = 409 if exc.status_code == 409 else 503
+        raise HTTPException(
+            status_code=status_code,
+            detail="Personal Brain processing or storage is unavailable.",
+        ) from exc
+    if not items:
+        raise HTTPException(status_code=503, detail="Personal Brain returned no usable items")
+    authorization = [
+        AuthorizationOutcome(
+            destination_app=destination,
+            record_type=items[0].record_type,
+            allowed=False,
+            reason="cross_app_delivery_is_not_enabled_for_brain_vault",
+        )
+        for destination in requested_destinations
+        if destination != source_app
+    ]
+    return ProcessingResponse(
+        input_id=payload.input_id or operation_key,
+        processing_id=processing_id,
+        source_app=source_app,
+        status="awaiting_review" if authorization else "delivered",
+        items=items,
+        classification=ClassificationSummary(
+            analysis_mode=str(analysis.get("analysis_mode") or "deterministic"),
+            confidence_kind=str(analysis.get("confidence_kind") or "heuristic"),
+            segment_count=len(items),
+            categories=sorted({item.category for item in items}),
+        ),
+        authorization=authorization,
+        memory_operations=[
+            MemoryOperation(
+                action="stored" if payload.persist_memory or payload.consent.memory_write else "skipped",
+                item_index=item.index,
+                memory_id=records[item.index].record_id,
+                kind="fact",
+                content_preview=item.summary[:120],
+            )
+            for item in items
+        ],
+        delivery=deliveries,
+        record_references=records,
+        review_required=bool(authorization),
+        idempotency_key=operation_key,
+    )
 
 
 @router.get("/{processing_id}", response_model=ProcessingResponse)
 async def get_processing_run(
     processing_id: uuid.UUID,
+    client_app: str = Query(..., min_length=1, max_length=100),
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db),
 ) -> ProcessingResponse:
-    """Return the state of one processing run owned by the caller."""
-    router_service = BrainRouter(session)
+    """Rebuild processing status from the owner's Brain vault records."""
+    if get_catalog_app(client_app) is None or not await AppConnectionService(
+        session
+    ).has_active_permission(current_user, client_app, "brain", "read"):
+        raise HTTPException(status_code=403, detail="App is not authorized to read processing status")
+    identity = await AIIdentityRepository(session).get_by_user_id(current_user.id)
+    brain = (
+        await PersonalAIBrainRepository(session).get_by_ai_identity_id(identity.id)
+        if identity
+        else None
+    )
+    if brain is None or brain.provisioning_status != "ready":
+        raise HTTPException(status_code=503, detail="Personal Brain is not ready")
+    connections = AppConnectionService(session)
+    if client_app == "brain":
+        namespaces = {"shared", "documents", "apps/brain"}
+        namespaces.update(
+            f"apps/{module.module_slug}"
+            for module in await connections.list_connections(current_user)
+            if module.is_active
+            and connections.has_permission(module, "brain", "read")
+        )
+    else:
+        namespaces = {f"apps/{client_app}"}
+    client = get_brain_client()
     try:
-        outcome = await router_service.get_run(current_user, processing_id)
-    except RouterProcessingError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
-    return _build_response(outcome)
+        records = []
+        for namespace in sorted(namespaces):
+            listing = await client.vault_request(
+                user_id=str(current_user.id),
+                brain_id=str(brain.id),
+                method="GET",
+                path="records",
+                params={
+                    "namespace": namespace,
+                    "source_reference": str(processing_id),
+                    "limit": 50,
+                },
+            )
+            records.extend(listing.get("items", []))
+    except BrainServiceError as exc:
+        raise HTTPException(
+            status_code=503, detail="Processing records are unavailable"
+        ) from exc
+    if not records:
+        raise HTTPException(status_code=404, detail="Processing run not found")
+    records.sort(
+        key=lambda record: (record.get("metadata") or {}).get("segment_index", 0)
+    )
+    metadata_items = [record.get("metadata") or {} for record in records]
+    source_app = str(records[0].get("source_app") or "brain")
+    if source_app != client_app and client_app != "brain":
+        raise HTTPException(status_code=404, detail="Processing run not found")
+    blocked_destinations = metadata_items[0].get("blocked_destinations", [])
+    record_type = str(records[0].get("record_type") or "note")
+    authorization = [
+        AuthorizationOutcome(
+            destination_app=destination,
+            record_type=record_type,
+            allowed=False,
+            reason="cross_app_delivery_is_not_enabled_for_brain_vault_gateway",
+        )
+        for destination in blocked_destinations
+    ]
+    item_status = "awaiting_review" if authorization else "delivered"
+    items = [
+        ProcessedItem(
+            index=index,
+            category=str(metadata.get("category") or "unclassified"),
+            record_type=str(record.get("record_type") or "note"),
+            summary=str(metadata.get("summary") or record.get("title") or "")[:500],
+            confidence=max(0.0, min(1.0, float(metadata.get("confidence") or 0))),
+            confidence_kind=str(metadata.get("confidence_kind") or "heuristic"),
+            entities=list(metadata.get("entities") or []),
+            topics=list(metadata.get("topics") or []),
+            occurred_at=metadata.get("occurred_at"),
+            source_reference=str(processing_id),
+            destination_app=source_app,
+            status=item_status,
+        )
+        for index, (record, metadata) in enumerate(zip(records, metadata_items))
+    ]
+    return ProcessingResponse(
+        input_id=str(metadata_items[0].get("input_id") or processing_id),
+        processing_id=processing_id,
+        source_app=source_app,
+        status=item_status,
+        items=items,
+        classification=ClassificationSummary(
+            analysis_mode=str(metadata_items[0].get("analysis_mode") or "deterministic"),
+            confidence_kind=str(metadata_items[0].get("confidence_kind") or "heuristic"),
+            segment_count=len(items),
+            categories=sorted({item.category for item in items}),
+        ),
+        authorization=authorization,
+        review_required=bool(authorization),
+        delivery=[
+            DeliveryOutcome(
+                destination_app=source_app,
+                record_type=item.record_type,
+                status="delivered",
+                record_reference=record["record_id"],
+            )
+            for item, record in zip(items, records)
+        ],
+        record_references=[
+            RecordReference(
+                destination_app=source_app,
+                record_type=record["record_type"],
+                record_id=record["record_id"],
+                storage_type="brain_vault",
+            )
+            for record in records
+        ],
+    )
 
 
 @router.post("/{processing_id}/confirm", response_model=ProcessingResponse)
@@ -95,12 +364,10 @@ async def confirm_processing_run(
     session: AsyncSession = Depends(get_db),
 ) -> ProcessingResponse:
     """Deliver the items the user confirmed after a review."""
-    router_service = BrainRouter(session)
-    try:
-        outcome = await router_service.confirm(current_user, processing_id, payload.items)
-    except RouterProcessingError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
-    return _build_response(outcome)
+    raise HTTPException(
+        status_code=410,
+        detail="Cross-app delivery is not available through the Brain vault gateway.",
+    )
 
 
 @router.post("/{processing_id}/retry", response_model=ProcessingResponse)
@@ -110,12 +377,10 @@ async def retry_processing_run(
     session: AsyncSession = Depends(get_db),
 ) -> ProcessingResponse:
     """Retry the operations of a run that did not succeed."""
-    router_service = BrainRouter(session)
-    try:
-        outcome = await router_service.retry(current_user, processing_id)
-    except RouterProcessingError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
-    return _build_response(outcome)
+    raise HTTPException(
+        status_code=410,
+        detail="Submit the input again using the same Idempotency-Key.",
+    )
 
 
 @router.post("/{processing_id}/cancel", response_model=ProcessingResponse)
@@ -125,12 +390,10 @@ async def cancel_processing_run(
     session: AsyncSession = Depends(get_db),
 ) -> ProcessingResponse:
     """Cancel a run that has not been delivered yet."""
-    router_service = BrainRouter(session)
-    try:
-        outcome = await router_service.cancel(current_user, processing_id)
-    except RouterProcessingError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
-    return _build_response(outcome)
+    raise HTTPException(
+        status_code=410,
+        detail="Legacy processing runs are not available from Render.",
+    )
 
 
 # --------------------------------------------------------------------------

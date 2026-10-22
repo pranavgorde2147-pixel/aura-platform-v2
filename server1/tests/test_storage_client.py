@@ -93,6 +93,8 @@ def test_configuration_error_is_a_storage_service_error(monkeypatch):
 def test_valid_url_uses_storage_readiness_path(monkeypatch):
     monkeypatch.setenv("STORAGE_SERVER_URL", "https://storage.example/")
     monkeypatch.setenv("STORAGE_API_TOKEN", "test-internal-token")
+    monkeypatch.setenv("AI_ACCESS_CLIENT_ID", "cloudflare-client-id")
+    monkeypatch.setenv("AI_ACCESS_CLIENT_SECRET", "cloudflare-client-secret")
     get_settings.cache_clear()
     calls = _install(monkeypatch, [FakeResponse(200, {"status": "ready", "backend": "local"})])
 
@@ -101,6 +103,8 @@ def test_valid_url_uses_storage_readiness_path(monkeypatch):
 
     assert result == {"status": "ready", "backend": "local"}
     assert calls[0]["url"] == "https://storage.example/v1/storage/ready"
+    assert calls[0]["headers"]["CF-Access-Client-Id"] == "cloudflare-client-id"
+    assert calls[0]["headers"]["CF-Access-Client-Secret"] == "cloudflare-client-secret"
     assert calls[0]["headers"]["Authorization"] == "Bearer test-internal-token"
 
 

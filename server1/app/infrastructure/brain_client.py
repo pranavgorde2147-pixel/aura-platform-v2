@@ -287,6 +287,64 @@ class BrainClient:
         url = f"{self.base_url}/v1/brain/analyze"
         return await self._post_json(url, payload, headers)
 
+    async def vault_request(
+        self,
+        *,
+        user_id: str,
+        brain_id: str,
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Call one Brain-vault endpoint using the server-side service token."""
+        request_id = str(uuid.uuid4())
+        headers = self._headers(user_id, request_id)
+        url = f"{self.base_url}/v1/brains/{brain_id}/vault/{path.lstrip('/')}"
+        try:
+            async with httpx.AsyncClient(
+                timeout=self.timeout,
+                verify=self.verify_tls,
+            ) as client:
+                response = await client.request(
+                    method.upper(),
+                    url,
+                    json=json_body,
+                    params=params,
+                    headers=headers,
+                )
+        except httpx.TimeoutException as exc:
+            raise BrainServiceError(
+                "vault_timeout", "AURA Brain storage timed out"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise BrainServiceError(
+                "vault_unreachable", "AURA Brain storage is unavailable"
+            ) from exc
+
+        if response.status_code >= 400:
+            logger.warning(
+                "Server 2 vault request failed with HTTP %s", response.status_code
+            )
+            raise BrainServiceError(
+                "vault_rejected",
+                "AURA Brain storage rejected the request",
+                response.status_code,
+            )
+        if response.status_code == 204 or not response.content:
+            return {}
+        try:
+            result = response.json()
+        except ValueError as exc:
+            raise BrainServiceError(
+                "vault_invalid_response", "AURA Brain storage returned invalid data"
+            ) from exc
+        if not isinstance(result, dict):
+            raise BrainServiceError(
+                "vault_invalid_response", "AURA Brain storage returned invalid data"
+            )
+        return result
+
     async def health_check(self) -> dict[str, Any] | None:
         """Check Server 2 health status. Returns ``None`` when unreachable."""
         url = f"{self.base_url}/health"

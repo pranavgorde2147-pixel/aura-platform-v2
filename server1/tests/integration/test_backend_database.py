@@ -818,6 +818,8 @@ def test_core_apps_ingest_after_connection(client):
 
 @pytest.mark.integration
 def test_diary_record_is_retrieved_for_aura_core_query(client, monkeypatch):
+    from app.repositories.personal_ai_brain import PersonalAIBrainRepository
+
     email_a = f"diary-query-{uuid.uuid4().hex[:8]}@example.com"
     email_b = f"diary-isolation-{uuid.uuid4().hex[:8]}@example.com"
     _register(client, email_a)
@@ -832,6 +834,96 @@ def test_diary_record_is_retrieved_for_aura_core_query(client, monkeypatch):
         assert connected.status_code == 201, connected.text
     client.post("/api/v1/apps/me", json={"module_slug": "aura-core"}, headers=headers_b)
 
+    brains = {}
+
+    async def ready_brain(self, identity_id):
+        return brains.setdefault(
+            identity_id,
+            SimpleNamespace(
+                id=uuid.uuid5(uuid.NAMESPACE_OID, str(identity_id)),
+                provisioning_status="ready",
+            ),
+        )
+
+    monkeypatch.setattr(
+        PersonalAIBrainRepository, "get_by_ai_identity_id", ready_brain
+    )
+
+    class FakeServer2:
+        def __init__(self):
+            self.records = {}
+            self.contexts = {}
+            self.inference_count = 0
+
+        async def vault_request(
+            self, *, user_id, brain_id, method, path, json_body=None, params=None
+        ):
+            owner_records = self.records.setdefault(user_id, [])
+            if method == "POST" and path == "records":
+                existing = next(
+                    (
+                        record
+                        for record in owner_records
+                        if record["idempotency_key"] == json_body["idempotency_key"]
+                    ),
+                    None,
+                )
+                if existing:
+                    return existing
+                record = {
+                    **json_body,
+                    "record_id": str(uuid.uuid4()),
+                    "idempotency_key": json_body["idempotency_key"],
+                    "metadata": json_body.get("metadata") or {},
+                }
+                owner_records.append(record)
+                return record
+            if method == "GET" and path == "records":
+                items = [
+                    record
+                    for record in owner_records
+                    if record["namespace"] == params.get("namespace")
+                    and (
+                        "source_reference" not in params
+                        or record.get("source_reference") == params["source_reference"]
+                    )
+                ]
+                return {"items": items[: params.get("limit", 50)]}
+            if method == "POST" and path == "search":
+                namespaces = set(json_body["namespaces"])
+                return {
+                    "results": [
+                        {
+                            **record,
+                            "record_id": record["record_id"],
+                            "metadata": record.get("metadata") or {},
+                        }
+                        for record in owner_records
+                        if record["namespace"] in namespaces
+                    ]
+                }
+            raise AssertionError(f"Unexpected Server 2 request: {method} {path}")
+
+        async def infer(self, user_id, query, context, request_id=None, model=None):
+            self.inference_count += 1
+            self.contexts[user_id] = context
+            found = any(
+                "my pet name is sai" in record["content"].lower()
+                for record in context.get("authorized_records", [])
+            )
+            return {
+                "response": (
+                    "Your pet name is Sai." if found else "I do not know your pet name."
+                ),
+                "source": "integration_test",
+                "model": "test-model",
+            }
+
+    server2 = FakeServer2()
+    monkeypatch.setattr("app.api.v1.apps.get_brain_client", lambda: server2)
+    monkeypatch.setattr("app.api.v1.brain.get_brain_client", lambda: server2)
+    monkeypatch.setattr("app.api.v1.vault.get_brain_client", lambda: server2)
+
     entry = ("A regular note about my day. " * 8) + "My pet name is Sai."
     saved = client.post(
         "/api/v1/apps/diary/ingest",
@@ -842,38 +934,30 @@ def test_diary_record_is_retrieved_for_aura_core_query(client, monkeypatch):
     saved_body = saved.json()
     assert saved_body["accepted"] is True
     assert saved_body["record_id"]
-
-    class ContextAwareTestProvider:
-        def __init__(self):
-            self.context = None
-
-        async def prepare_external_context(self, user, query, context):
-            return {"user_id": str(user.id), "query": query}
-
-        async def process_query(self, user, query, context):
-            self.context = context
-            records = context.get("authorized_records", [])
-            found = any("my pet name is sai" in record["content"].lower() for record in records)
-            return {
-                "answer": "Your pet name is Sai." if found else "I do not know your pet name.",
-                "source": "integration_test",
-            }
-
-        async def personalize_response(self, user, answer, context):
-            return answer
-
-    provider = ContextAwareTestProvider()
-    from app.services.personal_brain import PersonalBrainService
-
-    monkeypatch.setattr(
-        "app.api.v1.brain.PersonalBrainService",
-        lambda session: PersonalBrainService(session, llm_provider=provider),
+    owner_a_id = next(iter(server2.records))
+    listing = client.get(
+        "/api/v1/brain/vault/records",
+        params={"source_app": "diary", "client_app": "aura-core"},
+        headers=headers_a,
     )
+    assert listing.status_code == 200, listing.text
+    assert listing.json()["items"][0]["record_id"] == saved_body["record_id"]
+    denied_listing = client.get(
+        "/api/v1/brain/vault/records",
+        params={"source_app": "diary", "client_app": "aura-core"},
+        headers=headers_b,
+    )
+    assert denied_listing.status_code == 403
 
     # Omit use_memory: Brain queries retrieve authorized memory/records by default.
+    request_id = str(uuid.uuid4())
     answer = client.post(
         "/api/v1/brain/query",
-        json={"query": "What is my pet name?", "source_app": "aura-core"},
+        json={
+            "query": "What is my pet name?",
+            "source_app": "aura-core",
+            "request_id": request_id,
+        },
         headers=headers_a,
     )
     assert answer.status_code == 200, answer.text
@@ -885,7 +969,26 @@ def test_diary_record_is_retrieved_for_aura_core_query(client, monkeypatch):
     assert body["records_used"][0]["source_app"] == "diary"
     assert body["records_used"][0]["source_reference"] == "diary-pet-name-1"
     assert "My pet name is Sai." in body["records_used"][0]["content"]
-    assert provider.context["authorized_records"][0]["source_app"] == "diary"
+    assert server2.contexts[owner_a_id]["authorized_records"][0]["source_app"] == "diary"
+    saved_turns = [
+        record for record in server2.records[owner_a_id]
+        if record["record_type"] == "conversation_turn"
+    ]
+    assert saved_turns[0]["namespace"] == "apps/aura-core"
+    assert saved_turns[0]["source_app"] == "aura-core"
+
+    retry = client.post(
+        "/api/v1/brain/query",
+        json={
+            "query": "What is my pet name?",
+            "source_app": "aura-core",
+            "request_id": request_id,
+        },
+        headers=headers_a,
+    )
+    assert retry.status_code == 200, retry.text
+    assert retry.json()["persisted_record_id"] == body["persisted_record_id"]
+    assert server2.inference_count == 1
 
     # Same-user ownership filter applies regardless of source app or known record id.
     other_user_answer = client.post(

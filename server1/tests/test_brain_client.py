@@ -24,6 +24,7 @@ class FakeResponse:
         self.status_code = status_code
         self._json = json_data if json_data is not None else {}
         self.text = text
+        self.content = b"{}"
 
     def json(self):
         if isinstance(self._json, Exception):
@@ -53,6 +54,21 @@ class FakeAsyncClient:
 
     async def get(self, url, headers=None):
         self._calls.append({"method": "GET", "url": url, "json": None, "headers": headers})
+        result = self._script.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    async def request(self, method, url, json=None, params=None, headers=None):
+        self._calls.append(
+            {
+                "method": method,
+                "url": url,
+                "json": json,
+                "params": params,
+                "headers": headers,
+            }
+        )
         result = self._script.pop(0)
         if isinstance(result, Exception):
             raise result
@@ -258,6 +274,38 @@ def test_non_json_success_body_is_reported_safely(monkeypatch):
             await client.infer(str(uuid.uuid4()), "hi", {})
 
         assert excinfo.value.error_code == "brain_invalid_response"
+
+    asyncio.run(_run())
+
+
+def test_vault_request_forwards_owner_brain_and_cloudflare_headers(monkeypatch):
+    async def _run():
+        configure(
+            monkeypatch,
+            AI_SERVER_URL="https://brain.example/",
+            INTERNAL_API_TOKEN="internal-token",
+            AI_ACCESS_CLIENT_ID="access-id",
+            AI_ACCESS_CLIENT_SECRET="access-secret",
+        )
+        calls = install_client(monkeypatch, [FakeResponse(200, {"items": []})])
+        client = BrainClient()
+        owner_id, brain_id = str(uuid.uuid4()), str(uuid.uuid4())
+
+        result = await client.vault_request(
+            user_id=owner_id,
+            brain_id=brain_id,
+            method="GET",
+            path="records",
+            params={"namespace": "apps/diary"},
+        )
+
+        assert result == {"items": []}
+        assert calls[0]["url"] == (
+            f"https://brain.example/v1/brains/{brain_id}/vault/records"
+        )
+        assert calls[0]["params"] == {"namespace": "apps/diary"}
+        assert calls[0]["headers"]["X-Aura-Owner-Id"] == owner_id
+        assert calls[0]["headers"]["CF-Access-Client-Id"] == "access-id"
 
     asyncio.run(_run())
 

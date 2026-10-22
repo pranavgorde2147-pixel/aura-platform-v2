@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 import uuid
+import time
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies.auth import get_current_user
-from app.core.config import get_settings
 from app.infrastructure.database.session import get_db
-from app.models.brain_memory import MemoryKind
+from app.infrastructure.brain_client import BrainServiceError, get_brain_client
 from app.models.user import User
 from app.schemas.brain import (
     BrainIngestRequest,
@@ -22,11 +22,70 @@ from app.schemas.brain import (
     MemoryUpdateRequest,
 )
 from app.services.app_registry import AppConnectionService
-from app.services.personal_brain import BrainRecordRetrievalError, PersonalBrainService
 from app.repositories.ai_identity import AIIdentityRepository
 from app.repositories.personal_ai_brain import PersonalAIBrainRepository
 
 router = APIRouter(prefix="/brain", tags=["Brain"])
+
+
+async def _vault_brain(session: AsyncSession, user: User):
+    identity = await AIIdentityRepository(session).get_by_user_id(user.id)
+    brain = (
+        await PersonalAIBrainRepository(session).get_by_ai_identity_id(identity.id)
+        if identity
+        else None
+    )
+    if identity is None or brain is None:
+        raise HTTPException(status_code=404, detail="Personal Brain not found")
+    if brain.provisioning_status != "ready":
+        raise HTTPException(status_code=503, detail="Personal Brain is not ready")
+    return identity, brain
+
+
+async def _vault_call(user: User, brain_id: uuid.UUID, **kwargs) -> dict:
+    try:
+        return await get_brain_client().vault_request(
+            user_id=str(user.id), brain_id=str(brain_id), **kwargs
+        )
+    except BrainServiceError as exc:
+        if exc.status_code == 404:
+            raise HTTPException(status_code=404, detail="Brain record not found") from exc
+        if exc.status_code == 409:
+            raise HTTPException(status_code=409, detail="Brain record conflict") from exc
+        raise HTTPException(
+            status_code=503, detail="Personal Brain storage is unavailable"
+        ) from exc
+
+
+def _memory_response(record: dict, identity_id: uuid.UUID) -> MemoryResponse:
+    metadata = record.get("metadata") or {}
+    return MemoryResponse(
+        id=uuid.UUID(str(record["record_id"])),
+        ai_identity_id=identity_id,
+        kind=metadata.get("kind", "fact"),
+        source="brain",
+        content=record.get("content") or "",
+        summary=metadata.get("summary"),
+        source_app=record.get("source_app"),
+        importance=int(metadata.get("importance", 0)),
+        created_at=record.get("created_at"),
+    )
+
+
+def _query_namespaces(source_app: str | None, connections: list) -> list[str]:
+    """Return this caller's connected app namespaces, never another owner's."""
+    namespaces = {"shared", "conversations"}
+
+    for module in connections:
+        if not module.is_active:
+            continue
+        if AppConnectionService.has_permission(module, "brain", "read"):
+            namespaces.add(f"apps/{module.module_slug}")
+        if module.module_slug == "files" and AppConnectionService.has_permission(
+            module, "files", "read"
+        ):
+            namespaces.add("documents")
+    return sorted(namespaces)
 
 
 @router.get("/me", response_model=BrainProvisioningResponse)
@@ -92,31 +151,200 @@ async def query_brain(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="App is not authorized to query this user's brain",
             )
-    if (
-        get_settings().brain_remote_provisioning_enabled
-        and (brain is None or brain.provisioning_status != "ready")
-    ):
+    if brain is None or brain.provisioning_status != "ready":
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="The user's Brain is not ready; retry provisioning before querying.",
         )
 
-    service = PersonalBrainService(session)
+    request_id = str(payload.request_id or uuid.uuid4())
+    query_namespace = (
+        f"apps/{payload.source_app}" if payload.source_app else "conversations"
+    )
+    query_source_app = payload.source_app or "brain"
+    namespaces = ["shared"]
+    if payload.use_memory:
+        connection_service = AppConnectionService(session)
+        app_connections = await connection_service.list_connections(current_user)
+        namespaces = _query_namespaces(payload.source_app, app_connections)
+    client = get_brain_client()
+    records: list[dict] = []
     try:
-        result = await service.process_query(
-            current_user,
+        if payload.persist_interaction and payload.request_id is not None:
+            previous = await client.vault_request(
+                user_id=str(current_user.id),
+                brain_id=str(brain.id),
+                method="GET",
+                path="records",
+                params={
+                    "namespace": query_namespace,
+                    "source_reference": request_id,
+                    "limit": 2,
+                },
+            )
+            prior_items = previous.get("items", [])
+            if not prior_items and payload.source_app:
+                # Preserve idempotent retries for turns written before query
+                # records were stored in their source app namespace.
+                previous = await client.vault_request(
+                    user_id=str(current_user.id),
+                    brain_id=str(brain.id),
+                    method="GET",
+                    path="records",
+                    params={
+                        "namespace": "conversations",
+                        "source_reference": request_id,
+                        "limit": 2,
+                    },
+                )
+                prior_items = previous.get("items", [])
+            if prior_items:
+                prior = prior_items[0]
+                metadata = prior.get("metadata") or {}
+                if (
+                    metadata.get("query") != payload.query
+                    or metadata.get("source_app") != payload.source_app
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="request_id was already used for a different query",
+                    )
+                prior_records = metadata.get("used_records") or []
+                record_references = [
+                    {
+                        "id": uuid.UUID(str(item["record_id"])),
+                        "source_app": item.get("source_app") or "unknown",
+                        "record_type": item.get("record_type") or "record",
+                        "source_reference": item.get("source_reference"),
+                        "content": item.get("content") or "",
+                    }
+                    for item in prior_records
+                    if item.get("record_id")
+                ]
+                return BrainQueryResponse(
+                    answer=str(metadata.get("answer") or ""),
+                    request_id=payload.request_id,
+                    source=str(metadata.get("source") or "server2_brain"),
+                    context_used=bool(prior_records or payload.context),
+                    user_id=str(current_user.id),
+                    model=metadata.get("model"),
+                    tokens_used=metadata.get("tokens_used"),
+                    records_used=record_references,
+                    persisted_record_id=uuid.UUID(str(prior["record_id"])),
+                )
+        if payload.use_memory:
+            search_result = await client.vault_request(
+                user_id=str(current_user.id),
+                brain_id=str(brain.id),
+                method="POST",
+                path="search",
+                json_body={
+                    "query": payload.query,
+                    "limit": payload.memory_limit,
+                    "namespaces": sorted(set(namespaces)),
+                },
+            )
+            records = search_result.get("results", [])
+        enriched_context = {
+            key: value
+            for key, value in (payload.context or {}).items()
+            if key.lower() not in {
+                "vault",
+                "password",
+                "secret",
+                "token",
+                "jwt",
+                "authorized_records",
+                "authorized_memories",
+                "relevant_memories",
+                "known_facts",
+            }
+        }
+        authorized_records = [
+            {
+                "record_id": item.get("record_id"),
+                "source_app": item.get("source_app"),
+                "record_type": item.get("record_type"),
+                "source_reference": item.get("source_reference"),
+                "content": str(item.get("content") or "")[:4000],
+            }
+            for item in records
+        ]
+        if authorized_records:
+            enriched_context["authorized_records"] = authorized_records
+        start = time.perf_counter()
+        inference = await client.infer(
+            str(current_user.id),
             payload.query,
-            payload.context or {},
-            use_memory=payload.use_memory,
-            persist_interaction=payload.persist_interaction,
-            memory_limit=payload.memory_limit,
+            enriched_context,
+            request_id=request_id,
         )
-    except BrainRecordRetrievalError as exc:
+        answer = str(inference.get("response") or "")
+        if not answer:
+            raise BrainServiceError(
+                "brain_invalid_response", "AURA Brain returned an empty response"
+            )
+        persisted_record_id = None
+        if payload.persist_interaction:
+            stored = await client.vault_request(
+                user_id=str(current_user.id),
+                brain_id=str(brain.id),
+                method="POST",
+                path="records",
+                json_body={
+                    "record_type": "conversation_turn",
+                    "namespace": query_namespace,
+                    "idempotency_key": (
+                        f"query:{request_id}"
+                        if query_namespace == "conversations"
+                        else f"query:{payload.source_app}:{request_id}"
+                    ),
+                    "title": payload.query[:120],
+                    "content": f"User: {payload.query}\nAssistant: {answer}",
+                    "source_app": query_source_app,
+                    "source_reference": request_id,
+                    "metadata": {
+                        "query": payload.query,
+                        "answer": answer,
+                        "source_app": payload.source_app,
+                        "source": inference.get("source"),
+                        "model": inference.get("model"),
+                        "tokens_used": inference.get("tokens_used"),
+                        "used_records": authorized_records,
+                        "is_original": True,
+                    },
+                },
+            )
+            persisted_record_id = stored.get("record_id")
+    except BrainServiceError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="A selected Brain record is temporarily unavailable.",
+            detail="Personal Brain storage or inference is unavailable.",
         ) from exc
-    return BrainQueryResponse(**result)
+    return BrainQueryResponse(
+        answer=answer,
+        request_id=uuid.UUID(request_id),
+        source=str(inference.get("source") or "server2_brain"),
+        context_used=bool(authorized_records or enriched_context),
+        user_id=str(current_user.id),
+        model=inference.get("model"),
+        latency_ms=int((time.perf_counter() - start) * 1000),
+        tokens_used=inference.get("tokens_used"),
+        records_used=[
+            {
+                "id": item["record_id"],
+                "source_app": item["source_app"] or "unknown",
+                "record_type": item["record_type"] or "record",
+                "source_reference": item["source_reference"],
+                "content": item["content"],
+            }
+            for item in authorized_records
+            if item.get("record_id")
+        ],
+        persisted_record_id=(
+            uuid.UUID(str(persisted_record_id)) if persisted_record_id else None
+        ),
+    )
 
 
 @router.post("/ingest", response_model=BrainIngestResponse)
@@ -136,9 +364,58 @@ async def ingest_to_brain(
                 detail="App is not authorized to ingest into this user's brain",
             )
 
-    service = PersonalBrainService(session)
-    result = await service.ingest_data(current_user, payload.model_dump())
-    return BrainIngestResponse(**result)
+    identity, brain = await _vault_brain(session, current_user)
+    request_id = str(uuid.uuid4())
+    try:
+        classification = await get_brain_client().analyze(
+            user_id=str(current_user.id),
+            content=payload.content,
+            context=payload.metadata or {},
+            source_app=payload.source_app,
+            request_id=request_id,
+        )
+    except BrainServiceError as exc:
+        raise HTTPException(
+            status_code=503, detail="Personal Brain analysis is unavailable"
+        ) from exc
+    namespace = f"apps/{payload.source_app}" if payload.source_app else "shared"
+    stored = await _vault_call(
+        current_user,
+        brain.id,
+        method="POST",
+        path="records",
+        json_body={
+            "record_type": payload.content_type[:64],
+            "namespace": namespace,
+            "idempotency_key": f"ingest:{request_id}",
+            "title": str(classification.get("summary") or "")[:512] or None,
+            "content": payload.content,
+            "source_app": payload.source_app,
+            "source_reference": request_id,
+            "metadata": {
+                **(payload.metadata or {}),
+                "analysis_mode": classification.get("analysis_mode"),
+                "confidence_kind": classification.get("confidence_kind"),
+                "segment_count": len(classification.get("segments") or []),
+                "categories": sorted(
+                    {
+                        str(segment.get("category"))
+                        for segment in classification.get("segments", [])
+                        if isinstance(segment, dict) and segment.get("category")
+                    }
+                ),
+                "is_original": True,
+            },
+        },
+    )
+    record_id = uuid.UUID(str(stored["record_id"]))
+    return BrainIngestResponse(
+        classification=classification,
+        stored=True,
+        memory_id=record_id,
+        vault_entry_id=record_id,
+        record_id=record_id,
+    )
 
 
 @router.post("/memory", response_model=MemoryResponse, status_code=status.HTTP_201_CREATED)
@@ -148,18 +425,34 @@ async def create_memory(
     session: AsyncSession = Depends(get_db),
 ) -> MemoryResponse:
     """Explicitly persist a memory in the authenticated user's Personal Brain."""
-    service = PersonalBrainService(session)
-    memory = await service.store_memory_for_user(
+    if payload.source_app:
+        authorized = await AppConnectionService(session).has_active_permission(
+            current_user, payload.source_app, scope="memory", action="write"
+        )
+        if not authorized:
+            raise HTTPException(status_code=403, detail="App is not authorized to write memories")
+    identity, brain = await _vault_brain(session, current_user)
+    stored = await _vault_call(
         current_user,
-        content=payload.content,
-        kind=MemoryKind(payload.kind),
-        summary=payload.summary,
-        source_app=payload.source_app,
-        importance=payload.importance,
+        brain.id,
+        method="POST",
+        path="records",
+        json_body={
+            "record_type": "personal_memory",
+            "namespace": "shared",
+            "idempotency_key": str(uuid.uuid4()),
+            "title": payload.summary,
+            "content": payload.content,
+            "source_app": payload.source_app or "brain",
+            "metadata": {
+                "kind": payload.kind,
+                "summary": payload.summary,
+                "importance": payload.importance,
+                "is_original": True,
+            },
+        },
     )
-    if memory is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Personal brain not found")
-    return MemoryResponse.model_validate(memory)
+    return _memory_response(stored, identity.id)
 
 
 @router.get("/memory", response_model=list[MemoryResponse])
@@ -170,9 +463,15 @@ async def list_memories(
     session: AsyncSession = Depends(get_db),
 ) -> list[MemoryResponse]:
     """List persisted memories for the authenticated user."""
-    service = PersonalBrainService(session)
-    memories = await service.list_memories_for_user(current_user, limit=limit, offset=offset)
-    return [MemoryResponse.model_validate(memory) for memory in memories]
+    identity, brain = await _vault_brain(session, current_user)
+    result = await _vault_call(
+        current_user,
+        brain.id,
+        method="GET",
+        path="records",
+        params={"namespace": "shared", "record_type": "personal_memory", "limit": limit, "offset": offset},
+    )
+    return [_memory_response(item, identity.id) for item in result.get("items", [])]
 
 
 @router.get("/context")
@@ -181,11 +480,10 @@ async def brain_context(
     session: AsyncSession = Depends(get_db),
 ) -> dict:
     """Return the current user's brain context in a protected endpoint."""
-    service = PersonalBrainService(session)
-    brain = await service.get_brain_for_user(current_user.id)
-    if brain is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Personal brain not found")
-    return await service.get_brain_context(brain.ai_identity_id)
+    _, brain = await _vault_brain(session, current_user)
+    return await _vault_call(
+        current_user, brain.id, method="GET", path="status"
+    )
 
 @router.get("/memory/search", response_model=list[MemoryResponse])
 async def search_memories(
@@ -195,9 +493,32 @@ async def search_memories(
     session: AsyncSession = Depends(get_db),
 ) -> list[MemoryResponse]:
     """Search persisted memories for the authenticated user."""
-    service = PersonalBrainService(session)
-    memories = await service.search_memories_for_user(current_user, query=q, limit=limit)
-    return [MemoryResponse.model_validate(memory) for memory in memories]
+    identity, brain = await _vault_brain(session, current_user)
+    result = await _vault_call(
+        current_user,
+        brain.id,
+        method="POST",
+        path="search",
+        json_body={
+            "query": q,
+            "limit": limit,
+            "namespaces": ["shared"],
+        },
+    )
+    return [
+        _memory_response(
+            {
+                "record_id": item["record_id"],
+                "content": item.get("content"),
+                "source_app": item.get("source_app"),
+                "metadata": item.get("metadata") or {},
+                "created_at": item.get("created_at"),
+            },
+            identity.id,
+        )
+        for item in result.get("results", [])
+        if item.get("record_type") == "personal_memory"
+    ]
 
 
 @router.get("/memory/{memory_id}", response_model=MemoryResponse)
@@ -207,11 +528,13 @@ async def get_memory(
     session: AsyncSession = Depends(get_db),
 ) -> MemoryResponse:
     """Get a specific memory for the authenticated user."""
-    service = PersonalBrainService(session)
-    memory = await service.get_memory_for_user(current_user, memory_id)
-    if memory is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found")
-    return MemoryResponse.model_validate(memory)
+    identity, brain = await _vault_brain(session, current_user)
+    record = await _vault_call(
+        current_user, brain.id, method="GET", path=f"records/{memory_id}"
+    )
+    if record.get("record_type") != "personal_memory":
+        raise HTTPException(status_code=404, detail="Memory not found")
+    return _memory_response(record, identity.id)
 
 
 @router.put("/memory/{memory_id}", response_model=MemoryResponse)
@@ -223,28 +546,48 @@ async def update_memory(
     session: AsyncSession = Depends(get_db),
 ) -> MemoryResponse:
     """Update a memory for the authenticated user."""
-    service = PersonalBrainService(session)
-    memory = await service.update_memory_for_user(
-        current_user,
-        memory_id,
-        content=payload.content,
-        summary=payload.summary,
-        importance=payload.importance,
+    identity, brain = await _vault_brain(session, current_user)
+    current = await _vault_call(
+        current_user, brain.id, method="GET", path=f"records/{memory_id}"
     )
-    if memory is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found")
-    return MemoryResponse.model_validate(memory)
+    if current.get("record_type") != "personal_memory":
+        raise HTTPException(status_code=404, detail="Memory not found")
+    metadata = dict(current.get("metadata") or {})
+    if payload.importance is not None:
+        metadata["importance"] = payload.importance
+    result = await _vault_call(
+        current_user,
+        brain.id,
+        method="PUT",
+        path=f"records/{memory_id}",
+        json_body={
+            "expected_version": current["version"],
+            "title": payload.summary,
+            "summary": payload.summary,
+            "metadata": metadata,
+            "content": payload.content,
+            "confirm_original_edit": payload.confirm_original_edit,
+        },
+    )
+    return _memory_response(result, identity.id)
 
 
 @router.delete("/memory/{memory_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_memory(
     memory_id: uuid.UUID,
+    confirm: bool = Query(default=False),
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db),
 ) -> None:
     """Delete a memory for the authenticated user."""
-    service = PersonalBrainService(session)
-    result = await service.delete_memory_for_user(current_user, memory_id)
-    if not result:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found")
+    if not confirm:
+        raise HTTPException(status_code=409, detail="Explicit delete confirmation is required")
+    _, brain = await _vault_brain(session, current_user)
+    await _vault_call(
+        current_user,
+        brain.id,
+        method="DELETE",
+        path=f"records/{memory_id}",
+        params={"confirm": "true"},
+    )
     return None

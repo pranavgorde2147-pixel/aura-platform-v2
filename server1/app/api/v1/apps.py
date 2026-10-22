@@ -10,12 +10,15 @@ from __future__ import annotations
 from typing import Any
 
 import uuid
+import hashlib
+import json
 
 from fastapi import APIRouter, Body, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies.auth import get_current_user
 from app.infrastructure.database.session import get_db
+from app.infrastructure.brain_client import BrainServiceError, get_brain_client
 from app.models.user import User
 from app.schemas.apps import (
     AppDefinition,
@@ -35,7 +38,8 @@ from app.services.app_registry import (
     get_catalog_app,
     list_catalog,
 )
-from app.services.personal_brain import AppIngestionPersistenceError, PersonalBrainService
+from app.repositories.ai_identity import AIIdentityRepository
+from app.repositories.personal_ai_brain import PersonalAIBrainRepository
 
 router = APIRouter(prefix="/apps", tags=["Apps"])
 
@@ -166,24 +170,86 @@ async def ingest_app_event(
             detail="App is not authorized to send data to this user's brain",
         )
 
-    brain = PersonalBrainService(session)
     try:
-        result = await brain.ingest_app_event(current_user, adapter, payload)
+        normalized = adapter.normalize(payload)
     except AppIngestionError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
         ) from exc
-    except AppIngestionPersistenceError as exc:
+    identity = await AIIdentityRepository(session).get_by_user_id(current_user.id)
+    brain = (
+        await PersonalAIBrainRepository(session).get_by_ai_identity_id(identity.id)
+        if identity
+        else None
+    )
+    if brain is None or brain.provisioning_status != "ready":
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
-        ) from exc
-
-    if not result.get("accepted"):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Personal brain not found for user",
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Personal Brain is not ready",
         )
-    return AppIngestResponse(source_app=adapter.slug, **result)
+    metadata = {
+        key: value for key, value in normalized.metadata.items() if key != "raw"
+    }
+    metadata["labels"] = list(normalized.labels)
+    metadata["importance"] = normalized.importance
+    metadata["kind"] = normalized.kind.value if normalized.kind is not None else None
+    metadata["event_type"] = normalized.event_type
+    if normalized.summary is not None:
+        metadata["summary"] = normalized.summary
+    canonical = json.dumps(
+        {
+            "source_app": adapter.slug,
+            "dedupe_key": normalized.dedupe_key,
+            "event_type": normalized.event_type,
+            "content": normalized.content,
+            "metadata": metadata,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    idempotency_key = normalized.dedupe_key or hashlib.sha256(
+        canonical.encode("utf-8")
+    ).hexdigest()
+    try:
+        stored = await get_brain_client().vault_request(
+            user_id=str(current_user.id),
+            brain_id=str(brain.id),
+            method="POST",
+            path="records",
+            json_body={
+                "record_type": normalized.resource_type or normalized.event_type,
+                "namespace": f"apps/{adapter.slug}",
+                "idempotency_key": idempotency_key,
+                "title": normalized.summary,
+                "content": normalized.content,
+                "source_app": adapter.slug,
+                "source_reference": normalized.dedupe_key,
+                "category": normalized.event_type[:64],
+                "metadata": {**metadata, "is_original": True},
+            },
+        )
+    except BrainServiceError as exc:
+        if exc.status_code == 409:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Idempotency key was already used for different data.",
+            ) from exc
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Personal Brain storage is unavailable; retry synchronization.",
+        ) from exc
+    record_id = stored.get("record_id")
+    return AppIngestResponse(
+        source_app=adapter.slug,
+        event_type=normalized.event_type,
+        accepted=True,
+        duplicate=False,
+        partial=False,
+        memory_id=record_id if normalized.persist_memory else None,
+        vault_entry_id=record_id,
+        record_id=record_id,
+    )
 
 
 @router.get("/{slug}", response_model=AppDefinition, include_in_schema=True)

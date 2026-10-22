@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies.auth import get_current_user
 from app.infrastructure.database.session import get_db
+from app.infrastructure.brain_client import BrainServiceError, get_brain_client
 from app.models.user import User
 from app.services.ai_identity import AIIdentityService
 from app.services.personal_brain import PersonalBrainService
@@ -142,5 +143,25 @@ async def get_brain_context(
     identity = await AIIdentityService(session).get_identity_by_id(ai_identity_id)
     if identity is None or identity.user_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed to access another user's brain context")
-    context = await service.get_brain_context(ai_identity_id)
-    return context
+    try:
+        vault_status = await get_brain_client().vault_request(
+            user_id=str(current_user.id),
+            brain_id=str(brain.id),
+            method="GET",
+            path="status",
+        )
+    except BrainServiceError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Personal Brain status is unavailable",
+        ) from exc
+    return BrainContextResponse(
+        brain={
+            "id": str(brain.id),
+            "name": brain.brain_name,
+            "status": brain.provisioning_status,
+        },
+        memory={"vault_record_count": vault_status.get("record_count", 0)},
+        knowledge={"vector": vault_status.get("vector", {})},
+        recent_timeline_count=0,
+    )

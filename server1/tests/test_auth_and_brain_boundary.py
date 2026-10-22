@@ -4,14 +4,121 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from sqlalchemy.exc import IntegrityError
+from fastapi import HTTPException
 
+from app.api.v1.brain import _query_namespaces
+from app.api.v1.vault import _authorize_record_action, _granted_namespaces
 from app.core.jwt import decode_token
 from app.core.security import hash_password
+from app.models.module_permission import PermissionAction
 from app.models.user import User
 from app.services.auth import AuthService
 from app.services.brain_provider import MockGeneralLLMProvider, MockPersonalBrainLLMProvider
 from app.services.personal_brain import PersonalBrainService
 from app.services.user import DuplicateEmailError, UserCreationError, UserService
+
+
+def test_brain_query_namespaces_follow_active_user_app_grants():
+    modules = [
+        SimpleNamespace(
+            module_slug="study",
+            is_active=True,
+            module_permissions=[
+                SimpleNamespace(scope="brain", permission=PermissionAction.READ)
+            ],
+        ),
+        SimpleNamespace(
+            module_slug="diary",
+            is_active=True,
+            module_permissions=[
+                SimpleNamespace(scope="brain", permission=PermissionAction.READ)
+            ],
+        ),
+        SimpleNamespace(
+            module_slug="files",
+            is_active=True,
+            module_permissions=[
+                SimpleNamespace(scope="files", permission=PermissionAction.READ)
+            ],
+        ),
+        SimpleNamespace(
+            module_slug="travel",
+            is_active=False,
+            module_permissions=[
+                SimpleNamespace(scope="brain", permission=PermissionAction.READ)
+            ],
+        ),
+    ]
+
+    assert _query_namespaces("study", modules) == [
+        "apps/diary",
+        "apps/study",
+        "conversations",
+        "documents",
+        "shared",
+    ]
+    assert _query_namespaces("brain", modules) == [
+        "apps/diary",
+        "apps/study",
+        "conversations",
+        "documents",
+        "shared",
+    ]
+    assert _query_namespaces(None, modules) == [
+        "apps/diary",
+        "apps/study",
+        "conversations",
+        "documents",
+        "shared",
+    ]
+    assert _granted_namespaces("study", modules) == [
+        "apps/diary",
+        "apps/study",
+        "conversations",
+        "documents",
+        "shared",
+    ]
+    assert _granted_namespaces("brain", modules) == [
+        "apps/diary",
+        "apps/study",
+        "conversations",
+        "documents",
+        "shared",
+    ]
+
+
+def test_cross_app_vault_read_requires_active_reader_and_source_grants(monkeypatch):
+    from app.services.app_registry import AppConnectionService
+
+    checks = []
+
+    async def has_active_permission(self, user, slug, scope, action):
+        checks.append((slug, scope, action))
+        return slug != "diary"
+
+    monkeypatch.setattr(
+        AppConnectionService, "has_active_permission", has_active_permission
+    )
+
+    async def run():
+        try:
+            await _authorize_record_action(
+                object(),
+                object(),
+                client_app="aura-core",
+                source_app="diary",
+                action="read",
+            )
+        except HTTPException as exc:
+            assert exc.status_code == 403
+        else:
+            raise AssertionError("A source namespace without a grant must be denied")
+
+    asyncio.run(run())
+    assert checks == [
+        ("aura-core", "brain", "read"),
+        ("diary", "brain", "read"),
+    ]
 
 
 def make_user(email: str = "user@example.com") -> User:
