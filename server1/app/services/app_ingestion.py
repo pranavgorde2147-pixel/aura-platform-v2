@@ -97,7 +97,7 @@ def _string_list(payload: dict[str, Any], *keys: str) -> list[str]:
 
 
 def _first_id(payload: dict[str, Any]) -> str | None:
-    for key in ("external_id", "event_id", "id", "uuid", "reference"):
+    for key in ("external_id", "event_id", "document_id", "id", "uuid", "reference"):
         value = payload.get(key)
         if value is not None and str(value).strip():
             return str(value).strip()
@@ -270,33 +270,50 @@ def normalize_travel(payload: dict[str, Any]) -> NormalizedIngestion:
 # -------------------------------------------------------------------- health
 
 def normalize_health(payload: dict[str, Any]) -> NormalizedIngestion:
-    """AURA Health: a user-consented wellness/health event.
+    """AURA Health: a user-consented wellness event or extracted document.
 
-    Documented input (``sends_to_aura``): wellness events. Only recorded when
-    the user explicitly sends it through their authorized connection; health
-    data is never collected implicitly.
+    The app may extract report text locally and send it in ``extracted_text``.
+    The complete text is stored as the vault record content; only explicitly
+    selected file metadata is retained alongside it.
     """
     event = _optional_text(payload, "event", "metric", "activity", "type")
-    body = _require_text(payload, "content", "notes", "summary", "text", "message", "value")
+    document_text = _optional_text(payload, "extracted_text", "extracted_content")
+    body = document_text or _require_text(
+        payload, "content", "notes", "summary", "text", "message", "value"
+    )
     occurred_at = _optional_text(payload, "occurred_at", "date", "timestamp")
+    document_name = _optional_text(payload, "file_name", "document_name", "filename")
+    document_type = _optional_text(payload, "file_type", "document_type", "mime_type")
+    document_id = _optional_text(payload, "document_id")
+    is_document = document_text is not None or document_name is not None or document_id is not None
 
-    content = f"{event}: {body}" if event and event not in body else body
+    content = (
+        body
+        if is_document or not event or event in body
+        else f"{event}: {body}"
+    )
     labels = ["health"]
     if event:
         labels.append(f"health:{event.lower()}")
+    if is_document:
+        labels.append("health:document")
     metadata = {
         "event": event,
         "value": payload.get("value"),
         "unit": payload.get("unit"),
         "occurred_at": occurred_at,
+        "document_id": document_id,
+        "document_name": document_name,
+        "document_type": document_type,
+        "extraction_method": _optional_text(payload, "extraction_method"),
         "raw": payload,
     }
     return NormalizedIngestion(
         content=content,
         kind=MemoryKind.FACT,
-        event_type="health.wellness_event",
-        summary=event or (body[:120] if body else None),
-        resource_type="wellness_event",
+        event_type="health.medical_report" if is_document else "health.wellness_event",
+        summary=document_name or event or (body[:120] if body else None),
+        resource_type="health_record" if is_document else "wellness_event",
         dedupe_key=_first_id(payload),
         labels=tuple(labels),
         metadata=metadata,

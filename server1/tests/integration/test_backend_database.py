@@ -561,7 +561,8 @@ def test_aura_core_brain_query_requires_its_own_connection_and_brain_read(client
     assert aura_core["client_type"] == "mobile"
     assert aura_core["queries_brain"] is True
     assert {(p["scope"], p["action"]) for p in aura_core["default_permissions"]} == {
-        ("brain", "read")
+        ("identity", "read"),
+        ("brain", "read"),
     }
 
     # Registration in the catalog does not create a per-user connection.
@@ -716,7 +717,7 @@ def test_brain_query_authorized_after_connecting_core_apps(client):
             assert {
                 (permission["scope"], permission["action"])
                 for permission in connect.json()["permissions"]
-            } == {("brain", "read")}
+            } == {("identity", "read"), ("brain", "read")}
         elif slug in {"study", "diary"}:
             assert {
                 (permission["scope"], permission["action"])

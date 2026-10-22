@@ -173,8 +173,10 @@ async def query_brain(
         namespaces = _query_namespaces(payload.source_app, app_connections)
     client = get_brain_client()
     records: list[dict] = []
+    operation = "vault operation"
     try:
         if payload.persist_interaction and payload.request_id is not None:
+            operation = "vault idempotency lookup"
             previous = await client.vault_request(
                 user_id=str(current_user.id),
                 brain_id=str(brain.id),
@@ -190,6 +192,7 @@ async def query_brain(
             if not prior_items and payload.source_app:
                 # Preserve idempotent retries for turns written before query
                 # records were stored in their source app namespace.
+                operation = "legacy conversation lookup"
                 previous = await client.vault_request(
                     user_id=str(current_user.id),
                     brain_id=str(brain.id),
@@ -237,6 +240,7 @@ async def query_brain(
                     persisted_record_id=uuid.UUID(str(prior["record_id"])),
                 )
         if payload.use_memory:
+            operation = "vault search"
             search_result = await client.vault_request(
                 user_id=str(current_user.id),
                 brain_id=str(brain.id),
@@ -277,6 +281,7 @@ async def query_brain(
         if authorized_records:
             enriched_context["authorized_records"] = authorized_records
         start = time.perf_counter()
+        operation = "inference"
         inference = await client.infer(
             str(current_user.id),
             payload.query,
@@ -290,6 +295,7 @@ async def query_brain(
             )
         persisted_record_id = None
         if payload.persist_interaction:
+            operation = "conversation save"
             stored = await client.vault_request(
                 user_id=str(current_user.id),
                 brain_id=str(brain.id),
@@ -321,6 +327,15 @@ async def query_brain(
             )
             persisted_record_id = stored.get("record_id")
     except BrainServiceError as exc:
+        if exc.status_code in {401, 403}:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=(
+                    f"Server 2 rejected the Brain {operation}. Check that Server 2 "
+                    "is running the current code and reconcile this account's Brain "
+                    "and app permissions with POST /api/v1/brain/me/reconcile."
+                ),
+            ) from exc
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Personal Brain storage or inference is unavailable.",

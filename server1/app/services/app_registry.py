@@ -49,8 +49,10 @@ CATALOG: dict[str, AppDefinition] = {
         needs_from_aura=["brain responses"],
         queries_brain=True,
         repo_path="server1/",
-        default_permissions=[ModulePermissionSpec(scope="brain", action="read")],
-        additional_permissions=[ModulePermissionSpec(scope="identity", action="read")],
+        default_permissions=[
+            ModulePermissionSpec(scope="identity", action="read"),
+            ModulePermissionSpec(scope="brain", action="read"),
+        ],
         # Chat is query-only; the app gets no memory-write or routed-record access.
         ingest_scope=None,
         routable=False,

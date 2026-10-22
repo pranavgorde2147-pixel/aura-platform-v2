@@ -18,6 +18,7 @@ from app.services.app_ingestion import (
     list_ingestion_apps,
     normalize_chat,
     normalize_diary,
+    normalize_health,
     normalize_meeting,
     normalize_notification,
     normalize_study,
@@ -57,6 +58,27 @@ def test_diary_adapter_is_interpretation():
     assert normalized.event_type == "diary.entry"
     assert normalized.content == "Felt productive today"
     assert "mood:good" in normalized.labels
+
+
+def test_health_adapter_preserves_extracted_report_text_and_metadata():
+    report_text = "Complete extracted medical report text " * 300
+    normalized = normalize_health(
+        {
+            "document_id": "report-001",
+            "file_name": "lab-results.pdf",
+            "file_type": "application/pdf",
+            "extracted_text": report_text,
+            "extraction_method": "android-ml-kit",
+        }
+    )
+
+    assert normalized.content == report_text.strip()
+    assert normalized.event_type == "health.medical_report"
+    assert normalized.resource_type == "health_record"
+    assert normalized.dedupe_key == "report-001"
+    assert normalized.metadata["document_name"] == "lab-results.pdf"
+    assert normalized.metadata["document_type"] == "application/pdf"
+    assert "health:document" in normalized.labels
 
 
 def test_meeting_adapter_includes_decisions_and_actions():

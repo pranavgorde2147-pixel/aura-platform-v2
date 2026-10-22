@@ -91,19 +91,19 @@ def test_catalog_is_populated_with_unique_slugs():
     assert "chronos" in slugs
 
 
-def test_aura_core_registry_requires_only_brain_read_for_queries():
+def test_aura_core_registry_defaults_identity_and_brain_read():
     catalog = {app.slug: app for app in list_catalog()}
     aura_core = catalog["aura-core"]
 
     assert aura_core.queries_brain is True
     assert {(permission.scope, permission.action) for permission in aura_core.default_permissions} == {
-        ("brain", "read")
+        ("identity", "read"),
+        ("brain", "read"),
     }
     assert {
         (permission.scope, permission.action)
         for permission in aura_core.additional_permissions
     } == {
-        ("identity", "read"),
         ("records", "read"),
         ("records", "write"),
         ("records", "delete"),
@@ -152,6 +152,21 @@ def test_install_grants_default_permissions():
     assert len(perms) >= 3
     scopes = {p.scope for p in perms}
     assert "brain" in scopes and "files" in scopes
+
+
+def test_install_aura_core_grants_identity_and_brain_read_by_default():
+    user = make_user()
+    service = AppConnectionService(FakeSession(results=[[]]))
+
+    module = asyncio.run(service.install(user, "aura-core"))
+
+    assert {
+        (permission.scope, permission.permission.value)
+        for permission in module.module_permissions
+    } == {
+        ("identity", "read"),
+        ("brain", "read"),
+    }
 
 
 def test_install_unknown_slug_raises():
