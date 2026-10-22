@@ -16,6 +16,11 @@ class ObjectMetadata(BaseModel):
     id: UUID
     owner_id: UUID
     ai_identity_id: UUID | None = None
+    #: The Brain that owns the object. Objects uploaded for a Brain live under
+    #: that Brain's own storage prefix.
+    brain_id: UUID | None = None
+    #: The trusted, owner- and Brain-scoped key inside the object store.
+    object_key: str
     filename: str
     content_type: str
     size_bytes: int

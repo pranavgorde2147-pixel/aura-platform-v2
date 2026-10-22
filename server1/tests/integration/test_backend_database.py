@@ -47,6 +47,7 @@ def client(database):
 
     sync_url = database.replace("postgresql://", "postgresql+psycopg://", 1)
     os.environ["POSTGRES_URL"] = sync_url
+    os.environ["BRAIN_REMOTE_PROVISIONING_ENABLED"] = "false"
     # Keep integration tests hermetic: never reach a real Qdrant from tests.
     os.environ["MEMORY_VECTOR_SEARCH_ENABLED"] = "false"
     get_settings.cache_clear()
@@ -67,6 +68,7 @@ def client(database):
 
     asyncio.run(engine.dispose())
     os.environ.pop("POSTGRES_URL", None)
+    os.environ.pop("BRAIN_REMOTE_PROVISIONING_ENABLED", None)
     os.environ.pop("MEMORY_VECTOR_SEARCH_ENABLED", None)
     get_settings.cache_clear()
     get_memory_indexer.cache_clear()
@@ -109,6 +111,110 @@ def test_registration_login_and_identity_persistence(client):
     refreshed = client.post("/api/v1/auth/refresh", json={"refresh_token": tokens["refresh_token"]})
     assert refreshed.status_code == 200
     assert refreshed.json()["access_token"]
+
+
+@pytest.mark.integration
+def test_owner_can_reconcile_existing_brain_without_replacing_identity(
+    client, monkeypatch
+):
+    from app.api.v1 import users as users_module
+
+    email = f"reconcile-{uuid.uuid4().hex[:8]}@example.com"
+    _register(client, email)
+    tokens = _login(client, email)
+    headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+    before = client.get("/api/v1/brain/me", headers=headers)
+    assert before.status_code == 200
+    assert before.json()["provisioning_status"] == "pending"
+
+    calls = []
+
+    class FakeBrainClient:
+        async def provision_brain(self, **kwargs):
+            calls.append(kwargs)
+            return {
+                "brain_id": kwargs["brain_id"],
+                "owner_id": kwargs["owner_id"],
+                "ai_identity_id": kwargs["ai_identity_id"],
+                "provisioning_status": "ready",
+                "resource_manifest_version": 1,
+                "model_configuration": {
+                    "model_id": kwargs["model_id"],
+                    "runtime_model_id": kwargs["model_id"],
+                    "runtime_mode": "dedicated",
+                },
+                "inference_runtime_status": "ready_simulated",
+                "llm_runtime_id": f"rt_{uuid.uuid4().hex}",
+                "llm_runtime_status": "ready_simulated",
+                "runtime_isolation": "simulated",
+                "model_configuration_id": f"{kwargs['model_id']}@1",
+                "memory_resource_reference": f"brain_{kwargs['brain_id']}/personal_memory",
+                "vector_resource_reference": f"brain_{kwargs['brain_id']}/vector_engine",
+                "vault_resource_reference": f"brain_{kwargs['brain_id']}/personal_vault",
+                "resource_root": f"brain_{kwargs['brain_id']}",
+                "manifest_version": 1,
+                "connected_app_count": 0,
+                "compute_allocation": {
+                    "max_concurrent_requests": kwargs["max_concurrent_requests"],
+                    "concurrency_enforcement": "per-brain",
+                },
+                "storage_resource_reference": (
+                    f"owners/{kwargs['owner_id']}/brains/{kwargs['brain_id']}"
+                ),
+                "request_count": 0,
+                "last_health_check": "2026-10-22T00:00:00+00:00",
+            }
+
+    monkeypatch.setattr(
+        users_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            brain_remote_provisioning_enabled=True,
+            ai_server_model="Qwen3.5-0.8B",
+        ),
+    )
+    monkeypatch.setattr(users_module, "get_brain_client", FakeBrainClient)
+    reconciled = client.post("/api/v1/brain/me/reconcile", headers=headers)
+    assert reconciled.status_code == 200, reconciled.text
+    assert reconciled.json()["provisioning_status"] == "ready"
+    assert reconciled.json()["brain_id"] == before.json()["brain_id"]
+    assert reconciled.json()["ai_identity_id"] == before.json()["ai_identity_id"]
+    assert calls[0]["model_id"] == before.json()["model_configuration"]["model_id"]
+    # The dedicated runtime assigned by Server 2 is projected onto the owner's
+    # Brain row and reported back to the owner.
+    assert reconciled.json()["llm_runtime_id"]
+    assert reconciled.json()["runtime_isolation"] == "simulated"
+
+
+@pytest.mark.integration
+def test_brain_admin_requires_operator_allowlist(client, monkeypatch):
+    from app.api.v1 import brain_admin as admin_module
+
+    email = f"brain-admin-{uuid.uuid4().hex[:8]}@example.com"
+    _register(client, email)
+    tokens = _login(client, email)
+    headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+    brain = client.get("/api/v1/brain/me", headers=headers).json()
+    user_id = client.get("/api/v1/auth/me", headers=headers).json()["user_id"]
+
+    monkeypatch.setattr(
+        admin_module,
+        "get_settings",
+        lambda: SimpleNamespace(brain_admin_user_ids=""),
+    )
+    denied = client.get("/api/v1/admin/brains", headers=headers)
+    assert denied.status_code == 403
+
+    monkeypatch.setattr(
+        admin_module,
+        "get_settings",
+        lambda: SimpleNamespace(brain_admin_user_ids=user_id),
+    )
+    allowed = client.get("/api/v1/admin/brains", headers=headers)
+    assert allowed.status_code == 200, allowed.text
+    payload = allowed.json()
+    assert any(item["brain_id"] == brain["brain_id"] for item in payload["items"])
+    assert "content" not in str(payload).lower()
 
 
 @pytest.mark.integration

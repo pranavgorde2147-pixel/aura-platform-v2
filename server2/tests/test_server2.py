@@ -1,4 +1,3 @@
-import os
 from uuid import uuid4
 
 import pytest
@@ -9,12 +8,49 @@ from app.main import _build_messages
 
 
 @pytest.fixture
-def client(monkeypatch):
+def client(monkeypatch, tmp_path):
     monkeypatch.setenv("INTERNAL_API_TOKEN", "test-token")
     monkeypatch.setenv("AURA_SKIP_MODEL_LOAD", "1")
-    os.environ["INTERNAL_API_TOKEN"] = "test-token"
-    os.environ["AURA_SKIP_MODEL_LOAD"] = "1"
-    return TestClient(app)
+    monkeypatch.setenv("AURA_SKIP_DOTENV", "1")
+    monkeypatch.delenv("EXTERNAL_AI_URL", raising=False)
+    monkeypatch.delenv("EXTERNAL_AI_KEY", raising=False)
+    monkeypatch.delenv("EXTERNAL_MODEL", raising=False)
+    monkeypatch.setenv("STORAGE_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'brain-test.db'}")
+    from app import storage_config, storage_db
+    from app.brain_manager import config, runtime
+    from app.brain_manager.lifecycle import manager
+
+    storage_config.get_settings.cache_clear()
+    storage_db._engine = None
+    storage_db._session_factory = None
+    storage_db._schema_ready_engine = None
+    config.reset_brain_manager_config()
+    runtime.factory.reset_runtime_adapter()
+    manager.reset_runtime_manager()
+    with TestClient(app) as test_client:
+        yield test_client
+    storage_config.get_settings.cache_clear()
+    storage_db._engine = None
+    storage_db._session_factory = None
+    storage_db._schema_ready_engine = None
+    config.reset_brain_manager_config()
+    runtime.factory.reset_runtime_adapter()
+    manager.reset_runtime_manager()
+
+
+def _provision(client, user_id: str) -> dict:
+    response = client.post(
+        "/v1/brains/provision",
+        headers={"Authorization": "Bearer test-token"},
+        json={
+            "brain_id": str(uuid4()),
+            "owner_id": user_id,
+            "ai_identity_id": str(uuid4()),
+            "model_id": "Qwen3.5-0.8B",
+        },
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
 
 
 def test_health(client):
@@ -63,10 +99,12 @@ def test_invalid_request_is_rejected(client):
 
 
 def test_wrong_model_name_rejected(client):
+    user_id = str(uuid4())
+    _provision(client, user_id)
     response = client.post(
         "/v1/brain/infer",
         json={
-            "user_id": str(uuid4()),
+            "user_id": user_id,
             "query": "Tell me a short answer.",
             "context": {"user_level": "general", "relevant_context": {}, "safety_constraints": []},
             "request_id": str(uuid4()),
@@ -78,10 +116,12 @@ def test_wrong_model_name_rejected(client):
 
 
 def test_response_schema(client):
+    user_id = str(uuid4())
+    _provision(client, user_id)
     response = client.post(
         "/v1/brain/infer",
         json={
-            "user_id": str(uuid4()),
+            "user_id": user_id,
             "query": "Give a short answer in one sentence.",
             "context": {"user_level": "general", "relevant_context": {"topic": "fitness"}, "safety_constraints": []},
             "request_id": str(uuid4()),
@@ -100,6 +140,7 @@ def test_response_schema(client):
 
 def test_user_isolation(client):
     user_id = str(uuid4())
+    _provision(client, user_id)
     response = client.post(
         "/v1/brain/infer",
         json={
@@ -116,10 +157,12 @@ def test_user_isolation(client):
 
 
 def test_exact_model_name_is_required(client):
+    user_id = str(uuid4())
+    _provision(client, user_id)
     response = client.post(
         "/v1/brain/infer",
         json={
-            "user_id": str(uuid4()),
+            "user_id": user_id,
             "query": "Say hello.",
             "context": {"user_level": "general", "relevant_context": {}, "safety_constraints": []},
             "request_id": str(uuid4()),

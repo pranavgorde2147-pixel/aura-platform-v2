@@ -7,7 +7,7 @@ from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, Enum as SQLAlchemyEnum, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import DateTime, Enum as SQLAlchemyEnum, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -45,6 +45,33 @@ class PersonalAIBrain(BaseModel):
     state: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
     sync_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False, index=True)
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    provisioning_status: Mapped[str] = mapped_column(
+        String(32), default="pending", nullable=False, index=True
+    )
+    resource_manifest_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    model_configuration: Mapped[dict[str, str]] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
+    inference_runtime_status: Mapped[str] = mapped_column(
+        String(32), default="unregistered", nullable=False, index=True
+    )
+    # Identifier of the Brain's dedicated LLM runtime in Server 2. It is unique
+    # across all Brains; two Brains never share one runtime id.
+    llm_runtime_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    # Honest isolation level reported by Server 2 (dedicated_context,
+    # dedicated_weights, context_isolated_shared_weights or simulated).
+    runtime_isolation: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    compute_allocation: Mapped[dict[str, int | str]] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
+    storage_resource_reference: Mapped[str | None] = mapped_column(
+        String(255), nullable=True
+    )
+    last_health_check: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    provisioning_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    inference_request_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     status: Mapped[BrainStatus] = mapped_column(
         SQLAlchemyEnum(BrainStatus, native_enum=False),
         default=BrainStatus.ACTIVE,

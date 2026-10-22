@@ -11,6 +11,7 @@ from app.models.ai_identity import AIIdentity
 from app.repositories.user import UserRepository
 from app.repositories.ai_identity import AIIdentityRepository
 from app.repositories.personal_ai_brain import PersonalAIBrainRepository
+from app.core.config import get_settings
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -77,6 +78,12 @@ class UserService:
                 brain_name=full_name or "Personal Brain",
                 version="1.0",
                 state="initializing",
+                provisioning_status="pending",
+                resource_manifest_version=1,
+                model_configuration={"model_id": get_settings().ai_server_model},
+                inference_runtime_status="unregistered",
+                compute_allocation={"max_concurrent_requests": 1},
+                storage_resource_reference=f"brain:{identity.id}",
             )
             # Single commit for the whole account graph.
             await self.user_repo.commit()

@@ -410,10 +410,14 @@ Server 2 keeps the understanding behaviour (`AURA_SKIP_MODEL_LOAD`,
 | `app_records` | The application-owned records, partitioned by destination and record type, with retention and provenance. |
 | `brain_memories` | Unchanged, plus `retention_policy` and `expires_at`. |
 
-Migration: `server1/alembic/versions/e6a49cbd1731_add_shared_record_metadata_and_links.py`
-(revises `c4e8f1a2b7d9`). It adds structured metadata fields and the
-owner-scoped link table. Roll out with `alembic upgrade head` before deploying
-the API.
+Migrations:
+
+- `server1/alembic/versions/e6a49cbd1731_add_shared_record_metadata_and_links.py`
+  adds structured metadata fields and the owner-scoped link table.
+- `server1/alembic/versions/f1a2b3c4d5e6_add_brain_resource_registry.py`
+  adds per-user Brain provisioning and resource metadata.
+
+Roll out with `alembic upgrade head` before deploying Server 1.
 
 ---
 
@@ -430,3 +434,148 @@ the API.
   the score came from the model or from the structural analyser.
 - **The pipeline never bypasses permissions.** A missing grant becomes an
   explicit `awaiting_authorization` operation, never a silent skip.
+
+## 12. Per-user Brain resource registry
+
+Every Server 1 account has one `AIIdentity` and one `PersonalAIBrain` row,
+created in the account transaction. Server 1 uses a stable Brain UUID as the
+canonical resource identity and asks Server 2 to idempotently register the
+owner, identity, model configuration, storage namespace, and bounded request
+capacity. Registration failure leaves the account intact with `pending` or
+`failed` status and a safe error code; it can be retried without replacing the
+Brain or identity.
+
+Authenticated owners can inspect `GET /api/v1/brain/me` and retry provisioning
+with `POST /api/v1/brain/me/reconcile`. To enable metadata-only operator views,
+configure `BRAIN_ADMIN_USER_IDS` as a comma-separated list of trusted user UUIDs.
+The allowlisted admin can use `GET /api/v1/admin/brains` and
+`POST /api/v1/admin/brains/reconcile?limit=20`; an empty allowlist grants no
+admin access. The endpoints expose resource metadata, not user memory or
+record contents.
+
+### Deployment and recovery
+
+1. Configure matching `INTERNAL_API_TOKEN` values for Server 1 and Server 2.
+   Set Server 1 `AI_SERVER_URL` and `AI_SERVER_MODEL` to the Server 2 origin and
+   the exact model name configured by Server 2 (`MODEL_NAME` or its documented
+   default). Set Server 2 `STORAGE_DATABASE_URL` to persistent storage.
+2. Apply Server 1 migrations with `alembic upgrade head`, then deploy Server 2
+   with the Brain registry code. Its storage startup creates the
+   `managed_brains` table.
+3. Deploy Server 1 with `BRAIN_REMOTE_PROVISIONING_ENABLED=true` (the default).
+   New registrations provision after the account transaction commits. Existing
+   users are not remotely registered just because the migration ran.
+4. Each user can authenticate and call `POST /api/v1/brain/me/reconcile`. An
+   operator may instead set `BRAIN_ADMIN_USER_IDS` and run the bounded admin
+   reconcile endpoint. Check `GET /api/v1/brain/me` or the admin list for
+   `provisioning_status: "ready"`. This confirms registration and namespace
+   creation, not model health.
+5. Verify a real authenticated Brain query end to end. The Server 2
+   `last_health_check` is populated only after an inference/analysis request
+   completes without a server error. A `ready` registry entry alone is not
+   evidence that inference succeeded.
+
+### Isolation boundary and current capacity model
+
+Brain IDs, AI identities, relational memories, user records, and object-storage
+keys are owner-scoped. Brain-associated object keys use
+`owners/{owner_id}/brains/{brain_id}/...`; Server 2 rejects an identity that
+has not been registered to that owner.
+
+**Every Brain owns a dedicated LLM runtime.** Server 2 holds the authoritative
+registry and creates one runtime object per Brain (`llm_runtime_id`, unique
+across all Brains). What "dedicated" means depends on the configured runtime
+mode, and the service always reports the real isolation level in
+`runtime_isolation` rather than a flattering one:
+
+| Mode | Isolation reported | What is actually dedicated |
+|------|--------------------|------------------------------|
+| `dedicated` + llama.cpp | `dedicated_context` | One `llama_cpp.Llama` instance per Brain: its own context, KV cache and sampling state. The GGUF weight file is memory-mapped and shared read-only. |
+| `dedicated` + transformers | `dedicated_weights` | One `AutoModelForCausalLM` instance per Brain: its own weights, KV cache and tokenizer state. |
+| `external` | `context_isolated_shared_weights` | One provider handle and one context per Brain; the provider's weights are shared. |
+| `simulated` | `simulated` | A deterministic simulator with a real per-Brain runtime object, context and cache. Never presented as model output. |
+
+There is **no shared-runtime fallback**. When a Brain's dedicated runtime
+cannot be created, the registry records an honest state
+(`failed`, `resource_limited`, `waiting_for_resources` or `stopped`) with a
+stable error code, and the inference path answers `503` instead of serving the
+request from another Brain's runtime. There is no configuration switch that
+re-enables this: a Brain is only ever served by its own runtime.
+
+Each Brain additionally owns its own memory namespace, vector index, personal
+vault, connected-app authorization snapshot, processing-job queue and compute
+accounting (`request_count`, `max_concurrent_requests`).
+
+**Capacity is per process.** `BRAIN_MAX_CONCURRENT_RUNTIMES` bounds how many
+Brains may hold a live runtime in one Server 2 process, and
+`BRAIN_MAX_CONCURRENT_REQUESTS_PER_BRAIN` bounds the concurrent requests of a
+single Brain (enforced by an in-process semaphore). This is not a cross-worker
+quota and not per-user hardware allocation: a multi-process or multi-host
+deployment needs a shared scheduler (or sticky routing plus a shared capacity
+store) before it can claim that level of isolation. The
+`dedicated_weights` mode in particular costs real memory per Brain, so the
+capacity limit must be sized against the deployment's memory budget.
+
+### Administration
+
+Server 2 exposes a metadata-only administrative registry API under
+`/v1/admin/brains`. It requires both the shared internal service token and an
+owner id on the `BRAIN_ADMIN_OWNER_IDS` allowlist. An empty allowlist disables
+the API entirely. The administrative endpoints expose registry metadata,
+capacity and health — never vault contents, records or user memory.
+
+Server 1 exposes the matching operator endpoints under `/api/v1/admin/brains`,
+gated by `BRAIN_ADMIN_USER_IDS`.
+
+---
+
+## 13. Server 2 Brain APIs
+
+All Brain endpoints require the shared internal service token
+(`Authorization: Bearer $INTERNAL_API_TOKEN`). Endpoints that touch user data
+additionally require the owner id that Server 1 forwarded in
+`X-Aura-Owner-Id`.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/v1/brains/provision` | Register (idempotently) a Brain and give it a dedicated runtime and private resources. |
+| `GET` | `/v1/brains/{brain_id}` | Return the registry entry of one Brain. |
+| `GET` | `/v1/brains/{brain_id}/manifest` | Return the secret-free resource manifest of one Brain. |
+| `GET`/`POST` | `/v1/brains/{brain_id}/vault/records` | List or create the Brain's private vault records. |
+| `GET`/`DELETE` | `/v1/brains/{brain_id}/vault/records/{record_id}` | Read or delete one record. |
+| `GET`/`POST` | `/v1/brains/{brain_id}/vault/records/{record_id}/relationships` | Read or add the record's relationship graph. |
+| `POST` | `/v1/brains/{brain_id}/vault/search` | Semantic search inside the Brain's own vector index. |
+| `GET` | `/v1/brains/{brain_id}/vault/status` | Report the state of the vault and the vector index. |
+| `GET`/`PUT`/`DELETE` | `/v1/brains/{brain_id}/apps[/{app_slug}]` | Read, record or revoke the Brain's connected-app authorization snapshot. |
+| `POST`/`GET` | `/v1/brains/{brain_id}/jobs` | Enqueue or list the Brain's processing jobs. |
+| `POST` | `/v1/brains/{brain_id}/jobs/drain` | Run the Brain's queued jobs inside that Brain's context. |
+| `POST` | `/v1/brain/infer` | Run inference on the Brain's own dedicated runtime. |
+| `POST` | `/v1/brain/analyze` | Structured understanding on the Brain's own dedicated runtime. |
+| `GET` | `/v1/admin/brains[/{brain_id}]` | Administrative registry metadata (allowlisted admins only). |
+| `GET` | `/v1/admin/brains/cluster` | Cluster capacity and health picture. |
+| `GET` | `/v1/admin/brains/health` | Health check of every registered Brain. |
+| `POST` | `/v1/admin/brains/reconcile` | Reconcile the registry with the runtimes that actually exist. |
+| `POST` | `/v1/admin/brains/{brain_id}/runtime/stop` | Stop one Brain's dedicated runtime. |
+| `POST` | `/v1/admin/brains/{brain_id}/runtime/restart` | Restart one Brain's dedicated runtime. |
+
+### Owner isolation
+
+Every Brain-scoped read and write is filtered on `brain_id` **and** `owner_id`.
+Asking for another owner's Brain returns `404`, never `403`, so the API never
+confirms that another user's Brain exists. The inference path resolves the
+Brain from the registry using the authenticated `user_id` — the request body
+cannot re-target a request at another Brain.
+
+### Environment variables (Server 2)
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `BRAIN_RUNTIME_MODE` | auto | `dedicated`, `external` or `simulated`. Empty means: `external` when `AURA_SKIP_MODEL_LOAD=1` and an external provider is configured, `simulated` when no model can be loaded, `dedicated` otherwise. |
+| `BRAIN_RUNTIME_ADAPTER` | `auto` | `auto`, `llama_cpp`, `transformers` or `simulated`. |
+| `BRAIN_MAX_CONCURRENT_RUNTIMES` | `8` | How many Brains may hold a live runtime in this process. |
+| `BRAIN_MAX_CONCURRENT_REQUESTS_PER_BRAIN` | `1` | Concurrent requests served for one Brain. |
+| `BRAIN_MAX_CONTEXT_TOKENS` | `8192` | Context budget of one Brain's runtime. |
+| `BRAIN_RESOURCE_ROOT` | `./data/brains` | Root of the per-Brain resource directories. |
+| `BRAIN_MAX_JOBS_PER_BRAIN` | `64` | Maximum queued jobs per Brain. |
+| `BRAIN_JOB_MAX_ATTEMPTS` | `3` | Attempts before a job is marked failed. |
+| `BRAIN_ADMIN_OWNER_IDS` | empty | Owner ids allowed to call `/v1/admin/brains`. Empty disables the administrative API. |

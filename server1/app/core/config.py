@@ -48,12 +48,18 @@ class Settings(BaseSettings):
     ai_server_url: str = Field(default="http://localhost:8001", alias="AI_SERVER_URL")
     ai_server_model: str = Field(default="Qwen3.5-0.8B", alias="AI_SERVER_MODEL")
     internal_api_token: str = Field(default="", alias="INTERNAL_API_TOKEN")
+    brain_remote_provisioning_enabled: bool = Field(
+        default=True, alias="BRAIN_REMOTE_PROVISIONING_ENABLED"
+    )
     # Registration policy. Public sign-up stays enabled by default (matches the
     # documented product flow). Operators who do not want open registration can
     # set ALLOW_PUBLIC_REGISTRATION=false and create the first account with the
     # configured BOOTSTRAP_TOKEN (sent as the X-Bootstrap-Token header).
     allow_public_registration: bool = Field(default=True, alias="ALLOW_PUBLIC_REGISTRATION")
     bootstrap_token: str = Field(default="", alias="BOOTSTRAP_TOKEN")
+    # Explicit operator allowlist for metadata-only Brain administration.
+    # Empty means administrative endpoints are unavailable to all users.
+    brain_admin_user_ids: str = Field(default="", alias="BRAIN_ADMIN_USER_IDS")
     # Optional edge/gateway credentials (for example a Cloudflare Access service
     # token) sent to the Server 2 endpoint so a public tunnel only serves
     # authenticated service traffic. Both must be set to take effect.

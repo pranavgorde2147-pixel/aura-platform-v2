@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.storage_config import get_settings
-from app.storage_db import StoredObject
+from app.storage_db import ManagedBrain, StoredObject
 from app.storage.base import ObjectStore
 
 
@@ -23,8 +23,12 @@ class UnsupportedContentType(Exception):
     """Raised when an upload uses a disallowed content type."""
 
 
-def object_key(owner_id: uuid.UUID, object_id: uuid.UUID) -> str:
-    """Build the storage key. Ownership is encoded in the key prefix."""
+def object_key(
+    owner_id: uuid.UUID, object_id: uuid.UUID, brain_id: uuid.UUID | None = None
+) -> str:
+    """Build a trusted owner/Brain-scoped storage key."""
+    if brain_id is not None:
+        return f"owners/{owner_id}/brains/{brain_id}/{object_id}"
     return f"owners/{owner_id}/{object_id}"
 
 
@@ -54,6 +58,19 @@ async def store_object(
 ) -> StoredObject:
     """Validate and persist an object, returning its metadata record."""
     settings = get_settings()
+    brain_id = None
+    if ai_identity_id is not None:
+        brain_result = await session.execute(
+            select(ManagedBrain).where(
+                ManagedBrain.owner_id == owner_id,
+                ManagedBrain.ai_identity_id == ai_identity_id,
+                ManagedBrain.provisioning_status == "ready",
+            )
+        )
+        brain = brain_result.scalars().first()
+        if brain is None:
+            raise PermissionError("AI identity is not provisioned for this owner")
+        brain_id = brain.brain_id
 
     if settings.allowed_content_types and content_type not in settings.allowed_content_types:
         raise UnsupportedContentType(content_type)
@@ -67,7 +84,7 @@ async def store_object(
     stream.seek(0)
 
     object_id = uuid.uuid4()
-    key = object_key(owner_id, object_id)
+    key = object_key(owner_id, object_id, brain_id)
 
     expires_at = None
     if settings.default_retention_days > 0:
@@ -77,6 +94,9 @@ async def store_object(
         id=object_id,
         owner_id=owner_id,
         ai_identity_id=ai_identity_id,
+        # The Brain that owns the object, so the row itself records the
+        # Brain-scoped namespace the blob was written to.
+        brain_id=brain_id,
         object_key=key,
         filename=filename or "unnamed",
         content_type=content_type or "application/octet-stream",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hmac
+import asyncio
 import json
 import os
 import re
@@ -11,16 +12,26 @@ from typing import Any
 
 import torch
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from app.analysis import (
     build_analysis_prompt,
     deterministic_analysis,
     parse_analysis_response,
 )
-from app.external_proxy import call_external_model
+from app.api.brain_admin import router as brain_admin_router
+from app.api.brain_apps import router as brain_apps_router
+from app.api.brain_jobs import router as brain_jobs_router
+from app.api.brain_vault import router as brain_vault_router
+from app.api.brains import get_ready_brain, record_brain_request, router as brains_router
 from app.api.objects import router as objects_router
 from app.api.storage_health import router as storage_health_router
+from app.brain_manager.config import get_brain_manager_config
+from app.brain_manager.lifecycle.manager import get_runtime_manager
+from app.brain_manager.registry.enums import BrainRuntimeStatus
 from app.storage_db import dispose_engine as dispose_storage_engine
+from app.storage_db import ensure_schema as ensure_storage_schema
+from app.storage_db import get_session_factory as get_storage_session_factory
 from app.storage_db import init_models as init_storage_models
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
@@ -143,6 +154,25 @@ app = FastAPI(title="AURA Server 2", version="0.1.0")
 # probes.
 app.include_router(objects_router)
 app.include_router(storage_health_router, prefix="/v1/storage")
+app.include_router(brains_router)
+app.include_router(brain_vault_router)
+app.include_router(brain_apps_router)
+app.include_router(brain_jobs_router)
+app.include_router(brain_admin_router)
+
+_total_inference_slots = asyncio.Semaphore(
+    max(1, int(os.getenv("BRAIN_MAX_CONCURRENT_REQUESTS", "4")))
+)
+
+#: Runtime statuses that mean the Brain's own runtime can serve a request.
+_SERVABLE_RUNTIME_STATUSES = frozenset(
+    {
+        BrainRuntimeStatus.READY.value,
+        BrainRuntimeStatus.READY_EXTERNAL.value,
+        BrainRuntimeStatus.READY_SIMULATED.value,
+        BrainRuntimeStatus.DEGRADED.value,
+    }
+)
 
 
 class ModelRuntime:
@@ -475,16 +505,6 @@ def _approved_context_entries(value: Any, keys: tuple[str, ...]) -> list[dict[st
     return entries
 
 
-def _build_prompt(query: str, context: dict[str, Any]) -> str:
-    """Flatten the messages into a single completion prompt (transformers/external)."""
-    system, user = _build_messages(query, context)
-    return f"{system}\nUser query: {user}"
-
-
-def _generate_test_response() -> str:
-    return "This is a test-mode response generated without loading the local Qwen3.5 checkpoint."
-
-
 def _require_internal_token(authorization: str | None) -> None:
     """Validate the shared internal bearer token.
 
@@ -499,8 +519,133 @@ def _require_internal_token(authorization: str | None) -> None:
         raise HTTPException(status_code=401, detail="Invalid internal API token")
 
 
+@app.middleware("http")
+async def enforce_brain_runtime_isolation(request: Request, call_next):
+    """Authorize each inference/analysis call against its registered Brain."""
+    if request.url.path not in {"/v1/brain/infer", "/v1/brain/analyze"}:
+        return await call_next(request)
+    try:
+        _require_internal_token(request.headers.get("Authorization"))
+    except HTTPException as exc:
+        return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+
+    try:
+        body = await request.body()
+        payload = json.loads(body)
+        owner_id = uuid.UUID(str(payload.get("user_id", "")))
+    except (ValueError, TypeError, AttributeError, json.JSONDecodeError):
+        return JSONResponse({"detail": "user_id must be a valid UUID"}, status_code=400)
+
+    body_sent = False
+
+    async def replay_body():
+        nonlocal body_sent
+        if body_sent:
+            return {"type": "http.request", "body": b"", "more_body": False}
+        body_sent = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    request._receive = replay_body
+    await ensure_storage_schema()
+    factory = get_storage_session_factory()
+    async with factory() as session:
+        brain = await get_ready_brain(session, owner_id)
+        if brain is None:
+            return JSONResponse(
+                {"detail": "A provisioned Brain is required for inference"},
+                status_code=503,
+            )
+        if brain.llm_runtime_status not in _SERVABLE_RUNTIME_STATUSES:
+            return JSONResponse(
+                {
+                    "detail": "The Brain's dedicated runtime is not available",
+                    "runtime_status": brain.llm_runtime_status,
+                    "error_code": brain.runtime_last_error,
+                },
+                status_code=503,
+            )
+        brain_key = str(brain.brain_id)
+        concurrency = int(brain.compute_allocation.get("max_concurrent_requests", 1))
+
+    brain_slot = get_runtime_manager().slot(uuid.UUID(brain_key), limit=concurrency)
+    acquired_global = False
+    acquired_brain = False
+    try:
+        await asyncio.wait_for(_total_inference_slots.acquire(), timeout=5.0)
+        acquired_global = True
+        await asyncio.wait_for(brain_slot.acquire(), timeout=5.0)
+        acquired_brain = True
+    except TimeoutError:
+        if acquired_brain:
+            brain_slot.release()
+        if acquired_global:
+            _total_inference_slots.release()
+        return JSONResponse(
+            {"detail": "Brain inference capacity is temporarily exhausted"},
+            status_code=429,
+        )
+
+    try:
+        response = await call_next(request)
+    finally:
+        if acquired_brain:
+            brain_slot.release()
+        if acquired_global:
+            _total_inference_slots.release()
+
+    if response.status_code < 500:
+        async with factory() as session:
+            brain = await get_ready_brain(session, owner_id)
+            if brain is not None:
+                await record_brain_request(session, brain)
+    return response
+
+
+async def _resolve_brain_runtime(session, brain):
+    """Return the Brain's own runtime, (re-)creating it when necessary.
+
+    A Brain whose runtime disappeared - for example after a process restart -
+    gets a fresh dedicated runtime. When that is not possible the reason is
+    returned so the caller can report it honestly instead of falling back to a
+    shared runtime.
+    """
+    manager = get_runtime_manager()
+    runtime = manager.handle(brain.brain_id)
+    if runtime is not None and runtime.health().healthy:
+        return runtime, None
+    result = await manager.provision_runtime(session, brain)
+    if result.succeeded:
+        return manager.handle(brain.brain_id), None
+    return None, result.error_code or result.status.value
+
+
+def _runtime_provider(runtime: Any) -> str:
+    try:
+        described = runtime.describe() or {}
+    except Exception:  # pragma: no cover - defensive
+        described = {}
+    provider = described.get("provider")
+    if provider:
+        return str(provider)
+    return getattr(runtime, "provider", "local")
+
+
+def _response_model_name(runtime: Any) -> str:
+    """Return the model that produced the answer."""
+    if _runtime_provider(runtime) == "external":
+        return _external_model_name()
+    return _model_name()
+
+
 @app.post("/v1/brain/infer")
 async def brain_infer(request: Request, authorization: str | None = Header(default=None, alias="Authorization")) -> dict[str, Any]:
+    """Run one inference request on the caller's own dedicated Brain runtime.
+
+    The request is served by the Brain's *own* runtime: its context, its cache
+    and its concurrency limit belong to that Brain alone. When the runtime
+    cannot be created the request fails with an explicit reason - the request
+    is never served by another Brain's runtime.
+    """
     _require_internal_token(authorization)
 
     payload = await request.json()
@@ -514,159 +659,81 @@ async def brain_infer(request: Request, authorization: str | None = Header(defau
         raise HTTPException(status_code=400, detail="user_id must be a valid UUID")
     if not isinstance(query, str) or not query.strip():
         raise HTTPException(status_code=400, detail="query must be a non-empty string")
-    if _skip_model_load():
-        if _external_api_key() and _external_api_url():
-            expected_model = _external_model_name()
-            valid_models = {_model_name(), expected_model}
-            if model_name not in valid_models:
-                raise HTTPException(status_code=400, detail=f"model must be one of {valid_models}")
-        else:
-            expected_model = _model_name()
-            if model_name != expected_model:
-                raise HTTPException(status_code=400, detail=f"model must be exactly {expected_model}")
-    else:
-        expected_model = _model_name()
-        if model_name != expected_model:
-            raise HTTPException(status_code=400, detail=f"model must be exactly {expected_model}")
-    if request_id is not None and not _is_valid_uuid(request_id):
-        raise HTTPException(status_code=400, detail="request_id must be a valid UUID when supplied")
     if not isinstance(context, dict):
         raise HTTPException(status_code=400, detail="context must be an object")
+    if request_id is not None and not _is_valid_uuid(request_id):
+        raise HTTPException(status_code=400, detail="request_id must be a valid UUID when supplied")
 
-    # If we're running in skip mode and an external hosted LLM is configured,
-    # route the request to the external OpenAI-compatible provider (Groq) instead
-    if _skip_model_load():
-        if _external_api_key() and _external_api_url():
-            prompt = _build_prompt(query.strip(), context)
-            start = time.perf_counter()
-            try:
-                response_text = call_external_model(prompt)
-            except Exception as exc:
-                raise HTTPException(status_code=503, detail=f"External AI provider error: {exc}") from exc
-            latency_ms = int((time.perf_counter() - start) * 1000)
-            return {
-                "model": _external_model_name(),
-                "provider": "external",
-                "source": "server2_external",
-                "response": response_text,
-                "user_id": str(user_id),
-                "request_id": str(request_id) if request_id is not None else str(uuid.uuid4()),
-                "status": "ok",
-                "tokens_used": len(response_text.split()),
-                "latency_ms": latency_ms,
-            }
-
-        # fallback test response when skip mode is enabled but no external provider is configured
-        latency_ms = 0
-        start = time.perf_counter()
-        response_text = _generate_test_response()
-        latency_ms = int((time.perf_counter() - start) * 1000)
-        return {
-            "model": _model_name(),
-            "provider": "test",
-            "source": "server2_test_mode",
-            "response": response_text,
-            "user_id": str(user_id),
-            "request_id": str(request_id) if request_id is not None else str(uuid.uuid4()),
-            "status": "ok",
-            "tokens_used": len(response_text.split()),
-            "latency_ms": latency_ms,
-        }
-
-    try:
-        runtime = _get_runtime()
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"{_model_name()} model is unavailable: {exc}") from exc
-
-    if not runtime.ready or runtime.model is None:
-        raise HTTPException(status_code=503, detail=f"{_model_name()} model is unavailable")
-
-    start = time.perf_counter()
-
-    if isinstance(runtime, GGUFRuntime):
-        system, user_query = _build_messages(query.strip(), context)
-        response_text = runtime.generate(
-            system,
-            user_query,
-            max_new_tokens=int(os.getenv("MAX_NEW_TOKENS", "96")),
-            temperature=float(os.getenv("TEMPERATURE", "0.2")),
-            top_p=float(os.getenv("TOP_P", "0.8")),
-        )
-        generated_tokens = len(response_text.split())
-    else:
-        prompt = _build_prompt(query.strip(), context)
-        inputs = runtime.tokenizer(prompt, return_tensors="pt")
-        inputs = {k: v.to(runtime.device) for k, v in inputs.items()}
-
-        with torch.inference_mode():
-            generated = runtime.model.generate(
-                **inputs,
-                max_new_tokens=int(os.getenv("MAX_NEW_TOKENS", "96")),
-                do_sample=False,
-                temperature=float(os.getenv("TEMPERATURE", "0.2")),
-                top_p=float(os.getenv("TOP_P", "0.8")),
-                pad_token_id=runtime.tokenizer.eos_token_id,
-                eos_token_id=runtime.tokenizer.eos_token_id,
+    await ensure_storage_schema()
+    factory = get_storage_session_factory()
+    async with factory() as session:
+        brain = await get_ready_brain(session, uuid.UUID(str(user_id)))
+        if brain is None:
+            raise HTTPException(
+                status_code=503, detail="A provisioned Brain is required for inference"
             )
 
-        input_tokens = inputs["input_ids"].shape[1]
-        generated_tokens = generated.shape[1] - input_tokens
-        response_text = runtime.tokenizer.decode(
-            generated[0][input_tokens:],
-            skip_special_tokens=True,
-        ).strip()
+        runtime, error_code = await _resolve_brain_runtime(session, brain)
+        if runtime is None:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "The Brain's dedicated runtime is unavailable"
+                    f" ({error_code or 'unknown'})"
+                ),
+            )
 
-    latency_ms = int((time.perf_counter() - start) * 1000)
+        expected_models = {_model_name()}
+        external_model = _external_model_name()
+        if _external_api_key() and _external_api_url():
+            expected_models.add(external_model)
+        if model_name is not None and model_name not in expected_models:
+            raise HTTPException(
+                status_code=400, detail=f"model must be one of {sorted(expected_models)}"
+            )
+
+        system, user_query = _build_messages(query.strip(), context)
+        config = get_brain_manager_config()
+        start = time.perf_counter()
+        try:
+            response_text = runtime.generate(
+                system,
+                user_query,
+                max_new_tokens=config.max_new_tokens,
+                temperature=config.temperature,
+                top_p=config.top_p,
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"The Brain runtime could not answer: {type(exc).__name__}",
+            ) from exc
+        latency_ms = int((time.perf_counter() - start) * 1000)
+
+    provider = _runtime_provider(runtime)
     if not response_text:
         response_text = "I could not produce a response with the approved context provided."
 
     return {
-        "model": _model_name(),
-        "provider": getattr(runtime, "provider", "local"),
-        "source": "server2_local",
+        "model": _response_model_name(runtime),
+        "provider": provider,
+        "source": "server2_brain_runtime",
         "response": response_text,
         "user_id": str(user_id),
         "request_id": str(request_id) if request_id is not None else str(uuid.uuid4()),
         "status": "ok",
-        "tokens_used": int(generated_tokens),
+        "tokens_used": len(response_text.split()),
         "latency_ms": latency_ms,
+        "brain_id": str(brain.brain_id),
+        "llm_runtime_id": runtime.runtime_id,
+        "runtime_isolation": runtime.isolation,
+        "model_configuration_id": brain.model_configuration_id,
     }
 
 
 # ---------------------------------------------------------------------------
 # Structured analysis
 # ---------------------------------------------------------------------------
-
-
-def _complete_text(runtime: Any, system: str, user: str, *, max_new_tokens: int) -> str:
-    """Run one completion against whichever runtime is loaded."""
-    if isinstance(runtime, GGUFRuntime):
-        return runtime.generate(
-            system,
-            user,
-            max_new_tokens=max_new_tokens,
-            temperature=float(os.getenv("TEMPERATURE", "0.2")),
-            top_p=float(os.getenv("TOP_P", "0.8")),
-        )
-    prompt = f"{system}\n\n{user}"
-    inputs = runtime.tokenizer(prompt, return_tensors="pt")
-    inputs = {k: v.to(runtime.device) for k, v in inputs.items()}
-    with torch.inference_mode():
-        generated = runtime.model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            temperature=float(os.getenv("TEMPERATURE", "0.2")),
-            top_p=float(os.getenv("TOP_P", "0.8")),
-            pad_token_id=runtime.tokenizer.eos_token_id,
-            eos_token_id=runtime.tokenizer.eos_token_id,
-        )
-    input_tokens = inputs["input_ids"].shape[1]
-    decoded = runtime.tokenizer.decode(
-        generated[0][input_tokens:],
-        skip_special_tokens=True,
-    )
-    return decoded.strip()
 
 
 def _analysis_response(
@@ -757,55 +824,40 @@ async def brain_analyze(request: Request, authorization: str | None = Header(def
         context=context,
     )
 
-    # Test mode without an external provider: the deterministic analyser is the
-    # only implementation available, and the response says so.
-    if _skip_model_load() and not (_external_api_key() and _external_api_url()):
-        start = time.perf_counter()
-        segments = deterministic_analysis(content, source_app=source_app, max_segments=max_segments)
-        latency_ms = int((time.perf_counter() - start) * 1000)
-        response = _analysis_response(
-            user_id=str(user_id),
-            request_id=resolved_request_id,
-            provider="test",
-            model=model_name,
-            segments=segments,
-            analysis_mode="deterministic",
-            latency_ms=latency_ms,
-            degraded_reason="model_load_skipped",
-        )
-        response["language"] = language
-        return response
+    await ensure_storage_schema()
+    factory = get_storage_session_factory()
+    async with factory() as session:
+        brain = await get_ready_brain(session, uuid.UUID(str(user_id)))
+        if brain is None:
+            raise HTTPException(
+                status_code=503, detail="A provisioned Brain is required for analysis"
+            )
+        runtime, error_code = await _resolve_brain_runtime(session, brain)
+        if runtime is None:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "The Brain's dedicated runtime is unavailable"
+                    f" ({error_code or 'unknown'})"
+                ),
+            )
 
-    start = time.perf_counter()
-    raw_text: str | None = None
-    provider = "local"
-    if _skip_model_load():
-        # External hosted provider configured: route the analysis prompt to it.
-        provider = "external"
+        provider = _runtime_provider(runtime)
+        start = time.perf_counter()
+        raw_text: str | None = None
         try:
-            raw_text = call_external_model(f"{system}\n\n{user}")
+            raw_text = runtime.generate(
+                system,
+                user,
+                max_new_tokens=int(os.getenv("ANALYSIS_MAX_NEW_TOKENS", "512")),
+                temperature=get_brain_manager_config().temperature,
+                top_p=get_brain_manager_config().top_p,
+            )
         except Exception:
             raw_text = None
-    else:
-        try:
-            runtime = _get_runtime()
-        except Exception:
-            runtime = None
-        if runtime is not None and runtime.ready and runtime.model is not None:
-            provider = getattr(runtime, "provider", "local")
-            try:
-                raw_text = _complete_text(
-                    runtime,
-                    system,
-                    user,
-                    max_new_tokens=int(os.getenv("ANALYSIS_MAX_NEW_TOKENS", "512")),
-                )
-            except Exception:
-                raw_text = None
+        latency_ms = int((time.perf_counter() - start) * 1000)
 
     segments = parse_analysis_response(raw_text) if raw_text else None
-    latency_ms = int((time.perf_counter() - start) * 1000)
-
     if segments:
         response = _analysis_response(
             user_id=str(user_id),
@@ -819,11 +871,15 @@ async def brain_analyze(request: Request, authorization: str | None = Header(def
         response["language"] = language
         return response
 
-    # The model could not produce a usable structured answer: fall back to the
-    # deterministic analyser and mark the response as degraded. The provider
-    # names the producer of the labels; the attempted provider is reported
-    # separately so a heuristic answer is never presented as a model answer.
+    # The Brain's runtime could not produce a usable structured answer: fall
+    # back to the deterministic analyser and mark the response as degraded. The
+    # provider names the producer of the labels; the attempted provider is
+    # reported separately so a heuristic answer is never presented as a model
+    # answer.
     fallback = deterministic_analysis(content, source_app=source_app, max_segments=max_segments)
+    degraded_reason = (
+        "model_load_skipped" if provider == "simulated" else "llm_output_unusable"
+    )
     response = _analysis_response(
         user_id=str(user_id),
         request_id=resolved_request_id,
@@ -832,7 +888,7 @@ async def brain_analyze(request: Request, authorization: str | None = Header(def
         segments=fallback,
         analysis_mode="deterministic",
         latency_ms=latency_ms,
-        degraded_reason="llm_output_unusable",
+        degraded_reason=degraded_reason,
         attempted_provider=provider,
     )
     response["language"] = language

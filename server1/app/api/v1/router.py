@@ -5,6 +5,7 @@ from fastapi import APIRouter
 from app.api.v1.auth import router as auth_router
 from app.api.v1.apps import router as apps_router
 from app.api.v1.brain import router as brain_router
+from app.api.v1.brain_admin import router as brain_admin_router
 from app.api.v1.files import router as files_router
 from app.api.v1.health import router as health_router
 from app.api.v1.users import router as users_router
@@ -17,6 +18,7 @@ api_router.include_router(health_router)
 api_router.include_router(auth_router)
 api_router.include_router(users_router)
 api_router.include_router(brain_router)
+api_router.include_router(brain_admin_router)
 api_router.include_router(identity_router)
 api_router.include_router(files_router)
 api_router.include_router(apps_router)

@@ -28,9 +28,16 @@ def clean_model_env(monkeypatch):
         "EXTERNAL_AI_URL",
         "EXTERNAL_AI_KEY",
         "EXTERNAL_MODEL",
+        "BRAIN_RUNTIME_MODE",
     ):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(main_module, "MODEL_RUNTIME", None)
+    from app.brain_manager import config, runtime
+    from app.brain_manager.lifecycle import manager
+
+    config.reset_brain_manager_config()
+    runtime.factory.reset_runtime_adapter()
+    manager.reset_runtime_manager()
 
 
 def test_default_model_name_is_local_qwen(clean_model_env):
@@ -90,40 +97,54 @@ def test_health_skip_mode_reports_ok_without_loading(clean_model_env, monkeypatc
     assert body["provider"] == "local"
 
 
-def test_inference_uses_gguf_runtime(clean_model_env, monkeypatch):
+def test_inference_uses_gguf_runtime(clean_model_env, monkeypatch, tmp_path):
     monkeypatch.setenv("AURA_SKIP_MODEL_LOAD", "0")
+    monkeypatch.setenv("BRAIN_RUNTIME_MODE", "simulated")
     monkeypatch.setenv("MODEL_NAME", "Qwen3.5-0.8B")
     monkeypatch.setenv("INTERNAL_API_TOKEN", "test-token")
+    monkeypatch.setenv("AURA_SKIP_DOTENV", "1")
+    monkeypatch.setenv(
+        "STORAGE_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'gguf.db'}"
+    )
 
-    runtime = GGUFRuntime(Path("model.gguf"))
-    runtime.ready = True
-    runtime.model = object()
-    seen = {}
+    from app import storage_config, storage_db
 
-    def fake_generate(system, user, *, max_new_tokens, temperature, top_p):
-        seen["system"] = system
-        seen["user"] = user
-        return "The answer is four."
+    storage_config.get_settings.cache_clear()
+    storage_db._engine = None
+    storage_db._session_factory = None
+    storage_db._schema_ready_engine = None
 
-    monkeypatch.setattr(runtime, "generate", fake_generate)
-    monkeypatch.setattr(main_module, "_get_runtime", lambda: runtime)
+    client = TestClient(main_module.app)
+    user_id = "550e8400-e29b-41d4-a716-446655440000"
+    brain_id = "d8f430e7-92ab-4c61-8b52-761edac98543"
+    response = client.post(
+        "/v1/brains/provision",
+        headers={"Authorization": "Bearer test-token"},
+        json={
+            "brain_id": brain_id,
+            "owner_id": user_id,
+            "ai_identity_id": "6ba7b810-9dad-11d8-80b4-00c04fd430c8",
+            "model_id": "Qwen3.5-0.8B",
+        },
+    )
+    assert response.status_code == 200
 
     payload = {
-        "user_id": "550e8400-e29b-41d4-a716-446655440000",
+        "user_id": user_id,
         "query": "What is 2 + 2?",
         "context": {"user_level": "general", "relevant_context": {}, "safety_constraints": []},
         "request_id": "6ba7b810-9dad-11d8-80b4-00c04fd430c8",
         "model": "Qwen3.5-0.8B",
     }
-    response = TestClient(main_module.app).post(
+    response = client.post(
         "/v1/brain/infer", json=payload, headers={"Authorization": "Bearer test-token"}
     )
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["response"] == "The answer is four."
-    assert body["model"] == "Qwen3.5-0.8B"
-    assert seen["system"].startswith("You are AURA Server 2")
-    assert seen["user"] == "What is 2 + 2?"
+    assert body["brain_id"] == brain_id
+    assert body["runtime_isolation"] == "simulated"
+    assert body["llm_runtime_id"]
+    assert body["response"].startswith("[simulated:")
 
 
 def test_clean_gguf_output_strips_thinking_and_prompt_echo():

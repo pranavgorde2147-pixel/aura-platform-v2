@@ -219,6 +219,32 @@ class BrainClient:
         url = f"{self.base_url}/v1/brain/infer"
         return await self._post_json(url, payload, headers)
 
+    async def provision_brain(
+        self,
+        *,
+        brain_id: str,
+        owner_id: str,
+        ai_identity_id: str,
+        model_id: str,
+        max_concurrent_requests: int = 1,
+    ) -> dict[str, Any]:
+        """Register a canonical Server 1 Brain with Server 2 idempotently."""
+        payload = {
+            "brain_id": brain_id,
+            "owner_id": owner_id,
+            "ai_identity_id": ai_identity_id,
+            "model_id": model_id,
+            "resource_manifest_version": 1,
+            "max_concurrent_requests": max_concurrent_requests,
+        }
+        request_id = str(uuid.uuid4())
+        headers = self._headers(owner_id, request_id)
+        return await self._post_json(
+            f"{self.base_url}/v1/brains/provision",
+            payload,
+            headers,
+        )
+
     async def analyze(
         self,
         *,

@@ -92,7 +92,15 @@ def fresh_database(pg_server):
 @pytest.fixture(autouse=True)
 def restore_environment():
     """Restore process env/caches so migrated-DB tests cannot leak into others."""
-    saved = {key: os.environ.get(key) for key in ("POSTGRES_URL", "MEMORY_VECTOR_SEARCH_ENABLED")}
+    saved = {
+        key: os.environ.get(key)
+        for key in (
+            "POSTGRES_URL",
+            "MEMORY_VECTOR_SEARCH_ENABLED",
+            "BRAIN_REMOTE_PROVISIONING_ENABLED",
+        )
+    }
+    os.environ["BRAIN_REMOTE_PROVISIONING_ENABLED"] = "false"
     yield
     for key, value in saved.items():
         if value is None:
@@ -209,6 +217,13 @@ def test_migrated_schema_provisions_identity_brain_and_memory_isolation(fresh_da
         headers_a = {"Authorization": f"Bearer {token_a}"}
         headers_b = {"Authorization": f"Bearer {token_b}"}
 
+        brain_a = client.get("/api/v1/brain/me", headers=headers_a)
+        brain_b = client.get("/api/v1/brain/me", headers=headers_b)
+        assert brain_a.status_code == brain_b.status_code == 200
+        assert brain_a.json()["brain_id"] != brain_b.json()["brain_id"]
+        assert brain_a.json()["ai_identity_id"] != brain_b.json()["ai_identity_id"]
+        assert brain_a.json()["provisioning_status"] == "pending"
+
         # The Personal Brain binding exists for the authenticated user.
         context = client.get("/api/v1/brain/context", headers=headers_a)
         assert context.status_code == 200, context.text
@@ -245,7 +260,11 @@ def test_public_registration_can_be_locked_down(fresh_database, monkeypatch):
     monkeypatch.setattr(
         users_module,
         "get_settings",
-        lambda: SimpleNamespace(allow_public_registration=False, bootstrap_token="bootstrap-secret"),
+        lambda: SimpleNamespace(
+            allow_public_registration=False,
+            bootstrap_token="bootstrap-secret",
+            brain_remote_provisioning_enabled=False,
+        ),
     )
 
     email = f"locked-{uuid.uuid4().hex[:8]}@example.com"

@@ -19,6 +19,11 @@ from pathlib import Path
 
 from fastapi import FastAPI
 
+from app.api.brain_admin import router as brain_admin_router
+from app.api.brain_apps import router as brain_apps_router
+from app.api.brain_jobs import router as brain_jobs_router
+from app.api.brain_vault import router as brain_vault_router
+from app.api.brains import router as brains_router
 from app.api.objects import router as objects_router
 from app.api.storage_health import router as storage_health_router
 from app.storage_db import dispose_engine, init_models
@@ -44,6 +49,11 @@ app = FastAPI(title="AURA Storage (Server 2)", version="1.0.0")
 # Same paths as app.main so Server 1's StorageClient contract is identical.
 app.include_router(objects_router)
 app.include_router(storage_health_router, prefix="/v1/storage")
+app.include_router(brains_router)
+app.include_router(brain_vault_router)
+app.include_router(brain_apps_router)
+app.include_router(brain_jobs_router)
+app.include_router(brain_admin_router)
 
 
 @app.on_event("startup")

@@ -7,12 +7,14 @@ import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies.auth import get_current_user
+from app.core.config import get_settings
 from app.infrastructure.database.session import get_db
 from app.models.brain_memory import MemoryKind
 from app.models.user import User
 from app.schemas.brain import (
     BrainIngestRequest,
     BrainIngestResponse,
+    BrainProvisioningResponse,
     BrainQueryRequest,
     BrainQueryResponse,
     MemoryCreateRequest,
@@ -21,8 +23,51 @@ from app.schemas.brain import (
 )
 from app.services.app_registry import AppConnectionService
 from app.services.personal_brain import BrainRecordRetrievalError, PersonalBrainService
+from app.repositories.ai_identity import AIIdentityRepository
+from app.repositories.personal_ai_brain import PersonalAIBrainRepository
 
 router = APIRouter(prefix="/brain", tags=["Brain"])
+
+
+@router.get("/me", response_model=BrainProvisioningResponse)
+async def my_brain(
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db),
+) -> BrainProvisioningResponse:
+    identity = await AIIdentityRepository(session).get_by_user_id(current_user.id)
+    brain = (
+        await PersonalAIBrainRepository(session).get_by_ai_identity_id(identity.id)
+        if identity
+        else None
+    )
+    if identity is None or brain is None:
+        raise HTTPException(status_code=404, detail="Personal Brain is not provisioned")
+    return BrainProvisioningResponse(
+        brain_id=brain.id,
+        ai_identity_id=identity.id,
+        provisioning_status=brain.provisioning_status,
+        resource_manifest_version=brain.resource_manifest_version,
+        model_configuration=brain.model_configuration,
+        inference_runtime_status=brain.inference_runtime_status,
+        compute_allocation=brain.compute_allocation,
+        storage_resource_reference=brain.storage_resource_reference,
+        last_health_check=brain.last_health_check,
+        provisioning_error=brain.provisioning_error,
+        llm_runtime_id=brain.llm_runtime_id,
+        runtime_isolation=brain.runtime_isolation,
+    )
+
+
+@router.post("/me/reconcile", response_model=BrainProvisioningResponse)
+async def reconcile_my_brain(
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db),
+) -> BrainProvisioningResponse:
+    """Retry idempotent Server 2 registration for this authenticated owner."""
+    from app.api.v1.users import _provision_primary_brain
+
+    await _provision_primary_brain(session, current_user)
+    return await my_brain(current_user=current_user, session=session)
 
 
 @router.post("/query", response_model=BrainQueryResponse)
@@ -32,6 +77,12 @@ async def query_brain(
     session: AsyncSession = Depends(get_db),
 ) -> BrainQueryResponse:
     """Process a user query through their Personal Brain."""
+    identity = await AIIdentityRepository(session).get_by_user_id(current_user.id)
+    brain = (
+        await PersonalAIBrainRepository(session).get_by_ai_identity_id(identity.id)
+        if identity
+        else None
+    )
     if payload.source_app:
         authorized = await AppConnectionService(session).has_active_permission(
             current_user, payload.source_app, scope="brain", action="read"
@@ -41,6 +92,14 @@ async def query_brain(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="App is not authorized to query this user's brain",
             )
+    if (
+        get_settings().brain_remote_provisioning_enabled
+        and (brain is None or brain.provisioning_status != "ready")
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The user's Brain is not ready; retry provisioning before querying.",
+        )
 
     service = PersonalBrainService(session)
     try:

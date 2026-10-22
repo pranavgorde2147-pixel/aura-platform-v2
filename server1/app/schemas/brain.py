@@ -67,6 +67,26 @@ class BrainQueryResponse(BaseModel):
     persisted_memory_id: uuid.UUID | None = None
 
 
+class BrainProvisioningResponse(BaseModel):
+    """Safe owner-visible status of the authenticated user's primary Brain."""
+
+    brain_id: uuid.UUID
+    ai_identity_id: uuid.UUID
+    provisioning_status: str
+    resource_manifest_version: int
+    model_configuration: dict[str, str]
+    inference_runtime_status: str
+    compute_allocation: dict[str, int | str]
+    storage_resource_reference: str | None = None
+    last_health_check: datetime | None = None
+    provisioning_error: str | None = None
+    # Dedicated LLM runtime assigned to this Brain by Server 2. Unique across
+    # all Brains; two Brains never share one runtime id.
+    llm_runtime_id: str | None = None
+    # Honest isolation level reported by Server 2.
+    runtime_isolation: str | None = None
+
+
 class BrainIngestRequest(BaseModel):
     """Request to ingest processed application data into the Personal Brain."""
 
