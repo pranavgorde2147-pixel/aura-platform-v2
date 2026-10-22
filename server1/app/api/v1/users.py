@@ -130,7 +130,7 @@ async def _provision_primary_brain(session: AsyncSession, user: User) -> None:
                     brain.compute_allocation.get("max_concurrent_requests", 1)
                 ),
             ),
-            timeout=5.0,
+            timeout=get_settings().brain_provisioning_timeout_seconds,
         )
     except BrainServiceError as exc:
         brain.provisioning_status = "failed" if exc.status_code == 409 else "pending"

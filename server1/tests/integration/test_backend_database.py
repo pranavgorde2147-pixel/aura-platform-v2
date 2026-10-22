@@ -184,6 +184,7 @@ def test_owner_can_reconcile_existing_brain_without_replacing_identity(
         lambda: SimpleNamespace(
             brain_remote_provisioning_enabled=True,
             ai_server_model="Qwen3.5-0.8B",
+            brain_provisioning_timeout_seconds=900.0,
         ),
     )
     monkeypatch.setattr(users_module, "get_brain_client", FakeBrainClient)
@@ -198,7 +199,10 @@ def test_owner_can_reconcile_existing_brain_without_replacing_identity(
         "app_slug": "aura-core",
         "is_active": True,
         "consent_state": "granted",
-        "granted_scopes": [{"scope": "brain", "action": "read"}],
+        "granted_scopes": [
+            {"scope": "identity", "action": "read"},
+            {"scope": "brain", "action": "read"},
+        ],
     }
     # The dedicated runtime assigned by Server 2 is projected onto the owner's
     # Brain row and reported back to the owner.

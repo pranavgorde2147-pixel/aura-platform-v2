@@ -98,6 +98,8 @@ class BrainClient:
         url: str,
         payload: dict[str, Any],
         headers: dict[str, str],
+        *,
+        timeout: httpx.Timeout | None = None,
     ) -> dict[str, Any]:
         """POST JSON with bounded retries and safe error translation.
 
@@ -109,7 +111,7 @@ class BrainClient:
             attempt += 1
             try:
                 async with httpx.AsyncClient(
-                    timeout=self.timeout,
+                    timeout=timeout or self.timeout,
                     verify=self.verify_tls,
                 ) as client:
                     response = await client.post(url, json=payload, headers=headers)
@@ -247,6 +249,10 @@ class BrainClient:
             f"{self.base_url}/v1/brains/provision",
             payload,
             headers,
+            timeout=httpx.Timeout(
+                get_settings().brain_provisioning_timeout_seconds,
+                connect=self.timeout.connect,
+            ),
         )
 
     async def analyze(

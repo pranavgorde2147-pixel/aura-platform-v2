@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     brain_remote_provisioning_enabled: bool = Field(
         default=True, alias="BRAIN_REMOTE_PROVISIONING_ENABLED"
     )
+    brain_provisioning_timeout_seconds: float = Field(
+        default=900.0, gt=0, alias="BRAIN_PROVISIONING_TIMEOUT_SECONDS"
+    )
     # Registration policy. Public sign-up stays enabled by default (matches the
     # documented product flow). Operators who do not want open registration can
     # set ALLOW_PUBLIC_REGISTRATION=false and create the first account with the
