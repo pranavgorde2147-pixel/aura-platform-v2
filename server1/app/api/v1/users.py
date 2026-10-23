@@ -236,6 +236,8 @@ async def create_user(
         ) from exc
 
     logger.info("Registered new user account %s", user.id)
+    if get_settings().brain_remote_provisioning_enabled:
+        await AppConnectionService(session).install(user, "aura-core")
     await _provision_primary_brain(session, user)
     return user
 

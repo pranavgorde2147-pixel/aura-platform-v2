@@ -21,8 +21,12 @@ class BrainQueryRequest(BaseModel):
     source_app: str | None = Field(default=None, max_length=64)
     # Personal vault retrieval is enabled by default.
     use_memory: bool = True
-    # Persist the user query and Brain answer by default; callers may opt out.
-    persist_interaction: bool = True
+    # Backward-compatible input only. Query/answer turns are always stored in
+    # the owner's private Brain vault; this legacy flag no longer disables it.
+    persist_interaction: bool = Field(
+        default=True,
+        description="Deprecated compatibility field; query persistence is always enabled.",
+    )
     memory_limit: int = Field(default=5, ge=1, le=25)
 
 

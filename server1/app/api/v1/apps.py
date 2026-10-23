@@ -244,7 +244,7 @@ async def ingest_app_event(
         source_app=adapter.slug,
         event_type=normalized.event_type,
         accepted=True,
-        duplicate=False,
+        duplicate=bool(stored.get("duplicate", False)),
         partial=False,
         memory_id=record_id if normalized.persist_memory else None,
         vault_entry_id=record_id,

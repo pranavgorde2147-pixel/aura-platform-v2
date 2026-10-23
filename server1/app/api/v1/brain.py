@@ -174,8 +174,10 @@ async def query_brain(
     client = get_brain_client()
     records: list[dict] = []
     operation = "vault operation"
+    persisted_record_id: str | None = None
+    persisted_record_version: int | None = None
     try:
-        if payload.persist_interaction and payload.request_id is not None:
+        if payload.request_id is not None:
             operation = "vault idempotency lookup"
             previous = await client.vault_request(
                 user_id=str(current_user.id),
@@ -216,29 +218,65 @@ async def query_brain(
                         status_code=409,
                         detail="request_id was already used for a different query",
                     )
-                prior_records = metadata.get("used_records") or []
-                record_references = [
-                    {
-                        "id": uuid.UUID(str(item["record_id"])),
-                        "source_app": item.get("source_app") or "unknown",
-                        "record_type": item.get("record_type") or "record",
-                        "source_reference": item.get("source_reference"),
-                        "content": item.get("content") or "",
-                    }
-                    for item in prior_records
-                    if item.get("record_id")
-                ]
-                return BrainQueryResponse(
-                    answer=str(metadata.get("answer") or ""),
-                    request_id=payload.request_id,
-                    source=str(metadata.get("source") or "server2_brain"),
-                    context_used=bool(prior_records or payload.context),
-                    user_id=str(current_user.id),
-                    model=metadata.get("model"),
-                    tokens_used=metadata.get("tokens_used"),
-                    records_used=record_references,
-                    persisted_record_id=uuid.UUID(str(prior["record_id"])),
-                )
+                prior_answer = metadata.get("answer")
+                if prior_answer and metadata.get("interaction_status") != "pending":
+                    prior_records = metadata.get("used_records") or []
+                    record_references = [
+                        {
+                            "id": uuid.UUID(str(item["record_id"])),
+                            "source_app": item.get("source_app") or "unknown",
+                            "record_type": item.get("record_type") or "record",
+                            "source_reference": item.get("source_reference"),
+                            "content": item.get("content") or "",
+                        }
+                        for item in prior_records
+                        if item.get("record_id")
+                    ]
+                    return BrainQueryResponse(
+                        answer=str(prior_answer),
+                        request_id=payload.request_id,
+                        source=str(metadata.get("source") or "server2_brain"),
+                        context_used=bool(prior_records or payload.context),
+                        user_id=str(current_user.id),
+                        model=metadata.get("model"),
+                        tokens_used=metadata.get("tokens_used"),
+                        records_used=record_references,
+                        persisted_record_id=uuid.UUID(str(prior["record_id"])),
+                    )
+                persisted_record_id = str(prior["record_id"])
+                persisted_record_version = int(prior["version"])
+
+        if persisted_record_id is None:
+            operation = "conversation query save"
+            staged = await client.vault_request(
+                user_id=str(current_user.id),
+                brain_id=str(brain.id),
+                method="POST",
+                path="records",
+                json_body={
+                    "record_type": "conversation_turn",
+                    "namespace": query_namespace,
+                    "idempotency_key": (
+                        f"query:{request_id}"
+                        if query_namespace == "conversations"
+                        else f"query:{payload.source_app}:{request_id}"
+                    ),
+                    "title": payload.query[:120],
+                    "content": f"User: {payload.query}",
+                    "source_app": query_source_app,
+                    "source_reference": request_id,
+                    "metadata": {
+                        "query": payload.query,
+                        "answer": None,
+                        "source_app": payload.source_app,
+                        "interaction_status": "pending",
+                        "used_records": [],
+                    },
+                },
+            )
+            persisted_record_id = str(staged["record_id"])
+            persisted_record_version = int(staged["version"])
+
         if payload.use_memory:
             operation = "vault search"
             search_result = await client.vault_request(
@@ -253,6 +291,11 @@ async def query_brain(
                 },
             )
             records = search_result.get("results", [])
+            records = [
+                item
+                for item in records
+                if str(item.get("record_id")) != persisted_record_id
+            ]
         enriched_context = {
             key: value
             for key, value in (payload.context or {}).items()
@@ -293,39 +336,27 @@ async def query_brain(
             raise BrainServiceError(
                 "brain_invalid_response", "AURA Brain returned an empty response"
             )
-        persisted_record_id = None
-        if payload.persist_interaction:
-            operation = "conversation save"
-            stored = await client.vault_request(
-                user_id=str(current_user.id),
-                brain_id=str(brain.id),
-                method="POST",
-                path="records",
-                json_body={
-                    "record_type": "conversation_turn",
-                    "namespace": query_namespace,
-                    "idempotency_key": (
-                        f"query:{request_id}"
-                        if query_namespace == "conversations"
-                        else f"query:{payload.source_app}:{request_id}"
-                    ),
-                    "title": payload.query[:120],
-                    "content": f"User: {payload.query}\nAssistant: {answer}",
-                    "source_app": query_source_app,
-                    "source_reference": request_id,
-                    "metadata": {
-                        "query": payload.query,
-                        "answer": answer,
-                        "source_app": payload.source_app,
-                        "source": inference.get("source"),
-                        "model": inference.get("model"),
-                        "tokens_used": inference.get("tokens_used"),
-                        "used_records": authorized_records,
-                        "is_original": True,
-                    },
+        operation = "conversation answer save"
+        stored = await client.vault_request(
+            user_id=str(current_user.id),
+            brain_id=str(brain.id),
+            method="PUT",
+            path=f"records/{persisted_record_id}",
+            json_body={
+                "expected_version": persisted_record_version,
+                "title": payload.query[:120],
+                "content": f"User: {payload.query}\nAssistant: {answer}",
+                "metadata": {
+                    "answer": answer,
+                    "source": inference.get("source"),
+                    "model": inference.get("model"),
+                    "tokens_used": inference.get("tokens_used"),
+                    "used_records": authorized_records,
+                    "interaction_status": "completed",
                 },
-            )
-            persisted_record_id = stored.get("record_id")
+            },
+        )
+        persisted_record_id = str(stored.get("record_id") or persisted_record_id)
     except BrainServiceError as exc:
         if exc.status_code in {401, 403}:
             raise HTTPException(

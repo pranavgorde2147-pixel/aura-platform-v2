@@ -114,6 +114,42 @@ def test_registration_login_and_identity_persistence(client):
 
 
 @pytest.mark.integration
+def test_registration_connects_aura_core_for_brain_enabled_accounts(
+    client, monkeypatch
+):
+    from types import SimpleNamespace
+
+    from app.api.v1 import users as users_module
+
+    monkeypatch.setattr(
+        users_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            allow_public_registration=True,
+            bootstrap_token="",
+            brain_remote_provisioning_enabled=True,
+        ),
+    )
+    monkeypatch.setattr(
+        users_module, "_provision_primary_brain", AsyncMock(return_value=None)
+    )
+    email = f"core-signup-{uuid.uuid4().hex[:8]}@example.com"
+    _register(client, email)
+    headers = {
+        "Authorization": f"Bearer {_login(client, email)['access_token']}"
+    }
+
+    connections = client.get("/api/v1/apps/me", headers=headers)
+    assert connections.status_code == 200, connections.text
+    assert len(connections.json()["items"]) == 1
+    core = connections.json()["items"][0]
+    assert core["module_slug"] == "aura-core"
+    assert {
+        (item["scope"], item["action"]) for item in core["permissions"]
+    } == {("identity", "read"), ("brain", "read")}
+
+
+@pytest.mark.integration
 def test_owner_can_reconcile_existing_brain_without_replacing_identity(
     client, monkeypatch
 ):
@@ -423,7 +459,56 @@ def test_brain_ingest_records_vault_knowledge_and_timeline(client):
 
 
 @pytest.mark.integration
-def test_app_ingest_requires_connection_and_is_user_scoped(client):
+def test_app_ingest_requires_connection_and_is_user_scoped(client, monkeypatch):
+    from app.api.v1 import apps as apps_module
+    from app.infrastructure.brain_client import BrainServiceError
+
+    class FakeBrainClient:
+        def __init__(self):
+            self.records = {}
+
+        async def vault_request(
+            self, *, user_id, brain_id, method, path, json_body=None, **kwargs
+        ):
+            assert method == "POST"
+            assert path == "records"
+            assert json_body is not None
+            owner_records = self.records.setdefault(user_id, {})
+            idempotency_key = json_body["idempotency_key"]
+            existing = owner_records.get(idempotency_key)
+            if existing is not None:
+                if existing["content"] != json_body["content"]:
+                    raise BrainServiceError(
+                        "idempotency_conflict", "conflicting duplicate", 409
+                    )
+                return {"record_id": existing["record_id"], "duplicate": True}
+
+            record = {
+                "record_id": str(uuid.uuid4()),
+                "content": json_body["content"],
+                "brain_id": brain_id,
+            }
+            owner_records[idempotency_key] = record
+            return {"record_id": record["record_id"], "duplicate": False}
+
+    server2 = FakeBrainClient()
+    monkeypatch.setattr(apps_module, "get_brain_client", lambda: server2)
+
+    async def get_identity(self, user_id):
+        return SimpleNamespace(id=user_id)
+
+    async def get_brain(self, ai_identity_id):
+        return SimpleNamespace(id=ai_identity_id, provisioning_status="ready")
+
+    monkeypatch.setattr(
+        apps_module.AIIdentityRepository, "get_by_user_id", get_identity
+    )
+    monkeypatch.setattr(
+        apps_module.PersonalAIBrainRepository,
+        "get_by_ai_identity_id",
+        get_brain,
+    )
+
     email_a = f"appa-{uuid.uuid4().hex[:8]}@example.com"
     email_b = f"appb-{uuid.uuid4().hex[:8]}@example.com"
     _register(client, email_a)
@@ -453,13 +538,16 @@ def test_app_ingest_requires_connection_and_is_user_scoped(client):
     assert replay.json()["duplicate"] is True
     assert replay.json()["memory_id"] == body["memory_id"]
 
-    # Only one memory exists for user A.
-    memories_a = client.get("/api/v1/brain/memory", headers=headers_a).json()
-    assert len(memories_a) == 1
+    # The memo is stored in A's Server 2 vault, not the Server 1 memory table.
+    owner_a_id = client.get("/api/v1/auth/me", headers=headers_a).json()["user_id"]
+    assert len(server2.records[owner_a_id]) == 1
+    assert next(iter(server2.records[owner_a_id].values()))["content"] == (
+        "Lecture on normalization"
+    )
 
     # User B never authorized the app and cannot ingest or see A's data.
     assert client.post("/api/v1/apps/study/ingest", json=study_payload, headers=headers_b).status_code == 403
-    assert client.get("/api/v1/brain/memory", headers=headers_b).json() == []
+    assert len(server2.records) == 1
 
 
 @pytest.mark.integration
@@ -852,7 +940,7 @@ def test_diary_record_is_retrieved_for_aura_core_query(client, monkeypatch):
     headers_a = {"Authorization": f"Bearer {_login(client, email_a)['access_token']}"}
     headers_b = {"Authorization": f"Bearer {_login(client, email_b)['access_token']}"}
 
-    for slug in ("diary", "aura-core"):
+    for slug in ("diary", "study", "aura-core"):
         connected = client.post(
             "/api/v1/apps/me", json={"module_slug": slug}, headers=headers_a
         )
@@ -879,6 +967,7 @@ def test_diary_record_is_retrieved_for_aura_core_query(client, monkeypatch):
             self.records = {}
             self.contexts = {}
             self.inference_count = 0
+            self.fail_next_inference = False
 
         async def vault_request(
             self, *, user_id, brain_id, method, path, json_body=None, params=None
@@ -900,8 +989,25 @@ def test_diary_record_is_retrieved_for_aura_core_query(client, monkeypatch):
                     "record_id": str(uuid.uuid4()),
                     "idempotency_key": json_body["idempotency_key"],
                     "metadata": json_body.get("metadata") or {},
+                    "version": 1,
                 }
                 owner_records.append(record)
+                return record
+            if method == "PUT" and path.startswith("records/"):
+                record_id = path.rsplit("/", 1)[-1]
+                record = next(
+                    item for item in owner_records if item["record_id"] == record_id
+                )
+                assert json_body["expected_version"] == record["version"]
+                record.update(
+                    {
+                        key: value
+                        for key, value in json_body.items()
+                        if key not in {"expected_version", "metadata"}
+                    }
+                )
+                record["metadata"].update(json_body.get("metadata") or {})
+                record["version"] += 1
                 return record
             if method == "GET" and path == "records":
                 items = [
@@ -931,14 +1037,31 @@ def test_diary_record_is_retrieved_for_aura_core_query(client, monkeypatch):
 
         async def infer(self, user_id, query, context, request_id=None, model=None):
             self.inference_count += 1
+            if self.fail_next_inference:
+                self.fail_next_inference = False
+                from app.infrastructure.brain_client import BrainServiceError
+
+                raise BrainServiceError(
+                    "brain_unavailable", "simulated inference failure"
+                )
             self.contexts[user_id] = context
             found = any(
                 "my pet name is sai" in record["content"].lower()
                 for record in context.get("authorized_records", [])
             )
+            found_study = any(
+                "normalization notes" in record["content"].lower()
+                for record in context.get("authorized_records", [])
+            )
             return {
                 "response": (
-                    "Your pet name is Sai." if found else "I do not know your pet name."
+                    "Your study memo covers normalization."
+                    if found_study and "study memo" in query.lower()
+                    else (
+                        "Your pet name is Sai."
+                        if found and "pet name" in query.lower()
+                        else "I do not know your pet name."
+                    )
                 ),
                 "source": "integration_test",
                 "model": "test-model",
@@ -959,6 +1082,26 @@ def test_diary_record_is_retrieved_for_aura_core_query(client, monkeypatch):
     saved_body = saved.json()
     assert saved_body["accepted"] is True
     assert saved_body["record_id"]
+
+    study_memo = client.post(
+        "/api/v1/apps/study/ingest",
+        json={
+            "title": "Database study memo",
+            "notes": "Normalization notes: first normal form.",
+            "external_id": "study-memo-1",
+        },
+        headers=headers_a,
+    )
+    assert study_memo.status_code == 201, study_memo.text
+    study_record = next(
+        record
+        for record in server2.records[next(iter(server2.records))]
+        if record["record_id"] == study_memo.json()["record_id"]
+    )
+    assert study_record["namespace"] == "apps/study"
+    assert study_record["content"] == (
+        "Database study memo\nNormalization notes: first normal form."
+    )
     owner_a_id = next(iter(server2.records))
     listing = client.get(
         "/api/v1/brain/vault/records",
@@ -982,6 +1125,7 @@ def test_diary_record_is_retrieved_for_aura_core_query(client, monkeypatch):
             "query": "What is my pet name?",
             "source_app": "aura-core",
             "request_id": request_id,
+            "persist_interaction": False,
         },
         headers=headers_a,
     )
@@ -989,18 +1133,43 @@ def test_diary_record_is_retrieved_for_aura_core_query(client, monkeypatch):
     body = answer.json()
     assert "Sai" in body["answer"]
     assert body["memories_used"] == []
-    assert len(body["records_used"]) == 1
-    assert body["records_used"][0]["id"] == saved_body["record_id"]
-    assert body["records_used"][0]["source_app"] == "diary"
-    assert body["records_used"][0]["source_reference"] == "diary-pet-name-1"
-    assert "My pet name is Sai." in body["records_used"][0]["content"]
-    assert server2.contexts[owner_a_id]["authorized_records"][0]["source_app"] == "diary"
+    diary_records = [
+        record for record in body["records_used"]
+        if record["id"] == saved_body["record_id"]
+    ]
+    assert len(diary_records) == 1
+    assert diary_records[0]["source_app"] == "diary"
+    assert diary_records[0]["source_reference"] == "diary-pet-name-1"
+    assert "My pet name is Sai." in diary_records[0]["content"]
+    assert any(
+        record["source_app"] == "diary"
+        for record in server2.contexts[owner_a_id]["authorized_records"]
+    )
     saved_turns = [
         record for record in server2.records[owner_a_id]
         if record["record_type"] == "conversation_turn"
     ]
     assert saved_turns[0]["namespace"] == "apps/aura-core"
     assert saved_turns[0]["source_app"] == "aura-core"
+    assert saved_turns[0]["metadata"]["interaction_status"] == "completed"
+    assert saved_turns[0]["content"].startswith("User: What is my pet name?")
+
+    study_answer = client.post(
+        "/api/v1/brain/query",
+        json={
+            "query": "What does my study memo cover?",
+            "source_app": "aura-core",
+        },
+        headers=headers_a,
+    )
+    assert study_answer.status_code == 200, study_answer.text
+    assert "normalization" in study_answer.json()["answer"].lower()
+    assert any(
+        record["record_type"] == "conversation_turn"
+        and record["metadata"]["query"] == "What does my study memo cover?"
+        and record["metadata"]["interaction_status"] == "completed"
+        for record in server2.records[owner_a_id]
+    )
 
     retry = client.post(
         "/api/v1/brain/query",
@@ -1013,7 +1182,45 @@ def test_diary_record_is_retrieved_for_aura_core_query(client, monkeypatch):
     )
     assert retry.status_code == 200, retry.text
     assert retry.json()["persisted_record_id"] == body["persisted_record_id"]
-    assert server2.inference_count == 1
+    assert server2.inference_count == 2
+
+    failed_request_id = str(uuid.uuid4())
+    server2.fail_next_inference = True
+    failed_query = client.post(
+        "/api/v1/brain/query",
+        json={
+            "query": "Save this even if the Brain is unavailable.",
+            "source_app": "aura-core",
+            "request_id": failed_request_id,
+            "persist_interaction": False,
+        },
+        headers=headers_a,
+    )
+    assert failed_query.status_code == 503
+    failed_turn = next(
+        record
+        for record in server2.records[owner_a_id]
+        if record.get("source_reference") == failed_request_id
+    )
+    assert failed_turn["content"] == (
+        "User: Save this even if the Brain is unavailable."
+    )
+    assert failed_turn["metadata"]["interaction_status"] == "pending"
+    recovered_query = client.post(
+        "/api/v1/brain/query",
+        json={
+            "query": "Save this even if the Brain is unavailable.",
+            "source_app": "aura-core",
+            "request_id": failed_request_id,
+        },
+        headers=headers_a,
+    )
+    assert recovered_query.status_code == 200, recovered_query.text
+    assert any(
+        record["record_id"] == failed_turn["record_id"]
+        and record["metadata"]["interaction_status"] == "completed"
+        for record in server2.records[owner_a_id]
+    )
 
     # Same-user ownership filter applies regardless of source app or known record id.
     other_user_answer = client.post(
