@@ -107,6 +107,8 @@ def test_registration_login_and_identity_persistence(client):
     me = client.get("/api/v1/auth/me", headers=headers)
     assert me.status_code == 200, me.text
     assert me.json()["email"] == email
+    assert me.json()["id"] == me.json()["user_id"]
+    assert me.json()["full_name"] == "Integration User"
 
     refreshed = client.post("/api/v1/auth/refresh", json={"refresh_token": tokens["refresh_token"]})
     assert refreshed.status_code == 200
@@ -1197,6 +1199,7 @@ def test_diary_record_is_retrieved_for_aura_core_query(client, monkeypatch):
         headers=headers_a,
     )
     assert failed_query.status_code == 503
+    assert "inference" in failed_query.json()["detail"].lower()
     failed_turn = next(
         record
         for record in server2.records[owner_a_id]

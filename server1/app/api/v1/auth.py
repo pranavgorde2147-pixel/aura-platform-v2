@@ -73,6 +73,14 @@ async def logout(
 
 
 @router.get("/me")
-async def me(current_user: User = Depends(get_current_user)) -> dict[str, str]:
+async def me(
+    current_user: User = Depends(get_current_user),
+) -> dict[str, str | None]:
     """Return the currently authenticated user."""
-    return {"user_id": str(current_user.id), "email": current_user.email}
+    user_id = str(current_user.id)
+    return {
+        "id": user_id,
+        "user_id": user_id,
+        "email": current_user.email,
+        "full_name": current_user.full_name,
+    }

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-import uuid
+import re
 import time
+import uuid
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies.auth import get_current_user
@@ -88,6 +90,16 @@ def _query_namespaces(source_app: str | None, connections: list) -> list[str]:
     return sorted(namespaces)
 
 
+def _management_namespaces(connections: list) -> list[str]:
+    """Return every app namespace belonging to this user's Brain."""
+    namespaces = {"shared", "conversations", "documents"}
+    for module in connections:
+        slug = module.module_slug
+        if isinstance(slug, str) and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,99}", slug):
+            namespaces.add(f"apps/{slug}")
+    return sorted(namespaces)
+
+
 @router.get("/me", response_model=BrainProvisioningResponse)
 async def my_brain(
     current_user: User = Depends(get_current_user),
@@ -146,6 +158,11 @@ async def query_brain(
         if identity
         else None
     )
+    if payload.manage_vault and not payload.source_app:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="source_app is required for Brain vault management",
+        )
     if payload.source_app:
         authorized = await AppConnectionService(session).has_active_permission(
             current_user, payload.source_app, scope="brain", action="read"
@@ -167,7 +184,11 @@ async def query_brain(
     )
     query_source_app = payload.source_app or "brain"
     namespaces = ["shared"]
-    if payload.use_memory:
+    if payload.manage_vault:
+        connection_service = AppConnectionService(session)
+        app_connections = await connection_service.list_connections(current_user)
+        namespaces = _management_namespaces(app_connections)
+    elif payload.use_memory:
         connection_service = AppConnectionService(session)
         app_connections = await connection_service.list_connections(current_user)
         namespaces = _query_namespaces(payload.source_app, app_connections)
@@ -311,12 +332,14 @@ async def query_brain(
                 "known_facts",
                 "authorized_namespaces",
                 "confirm_tool_writes",
+                "manage_vault",
                 "source_app",
             }
         }
         enriched_context["source_app"] = payload.source_app
         enriched_context["authorized_namespaces"] = namespaces
         enriched_context["confirm_tool_writes"] = payload.confirm_tool_writes
+        enriched_context["manage_vault"] = payload.manage_vault
         authorized_records = [
             {
                 "record_id": item.get("record_id"),
@@ -370,12 +393,22 @@ async def query_brain(
                 detail=(
                     f"Server 2 rejected the Brain {operation}. Check that Server 2 "
                     "is running the current code and reconcile this account's Brain "
-                    "and app permissions with POST /api/v1/brain/me/reconcile."
+                    "and app permissions with POST /api/v1/brain/me/reconcile "
+                    f"({exc.error_code}, upstream HTTP {exc.status_code})."
                 ),
             ) from exc
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Personal Brain storage or inference is unavailable.",
+            detail=(
+                f"Personal Brain {operation} is unavailable "
+                f"({exc.error_code}"
+                + (
+                    f", upstream HTTP {exc.status_code}"
+                    if exc.status_code is not None
+                    else ""
+                )
+                + ")."
+            ),
         ) from exc
     return BrainQueryResponse(
         answer=answer,
