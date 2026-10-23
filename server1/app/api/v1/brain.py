@@ -332,6 +332,9 @@ async def query_brain(
                 "known_facts",
                 "authorized_namespaces",
                 "confirm_tool_writes",
+                "confirm_tool_deletes",
+                "confirmed_delete_scope",
+                "confirmed_delete_count",
                 "manage_vault",
                 "source_app",
             }
@@ -339,6 +342,9 @@ async def query_brain(
         enriched_context["source_app"] = payload.source_app
         enriched_context["authorized_namespaces"] = namespaces
         enriched_context["confirm_tool_writes"] = payload.confirm_tool_writes
+        enriched_context["confirm_tool_deletes"] = payload.confirm_tool_deletes
+        enriched_context["confirmed_delete_scope"] = payload.confirmed_delete_scope
+        enriched_context["confirmed_delete_count"] = payload.confirmed_delete_count
         enriched_context["manage_vault"] = payload.manage_vault
         authorized_records = [
             {

@@ -23,8 +23,12 @@ class BrainQueryRequest(BaseModel):
     use_memory: bool = True
     # Model-proposed vault writes require this explicit user/app confirmation.
     confirm_tool_writes: bool = False
+    # Destructive Brain-tool deletes require a separate, per-operation confirmation.
+    confirm_tool_deletes: bool = False
+    confirmed_delete_scope: str | None = Field(default=None, max_length=256)
+    confirmed_delete_count: int | None = Field(default=None, ge=0)
     # When enabled, the internal Brain may manage records across this owner's
-    # connected app namespaces. Writes still require confirm_tool_writes.
+    # connected app namespaces. Writes and deletes remain separately gated.
     manage_vault: bool = False
     # Backward-compatible input only. Query/answer turns are always stored in
     # the owner's private Brain vault; this legacy flag no longer disables it.

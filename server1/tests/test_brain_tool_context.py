@@ -72,6 +72,9 @@ def test_brain_query_replaces_client_supplied_tool_authorization(monkeypatch):
             "source_app": "health",
             "authorized_namespaces": ["apps/health"],
             "confirm_tool_writes": True,
+            "confirm_tool_deletes": True,
+            "confirmed_delete_scope": "namespace:apps/health",
+            "confirmed_delete_count": 9,
         },
     )
     result = asyncio.run(
@@ -86,6 +89,9 @@ def test_brain_query_replaces_client_supplied_tool_authorization(monkeypatch):
     assert inference_context["source_app"] == "diary"
     assert inference_context["authorized_namespaces"] == ["shared"]
     assert inference_context["confirm_tool_writes"] is False
+    assert inference_context["confirm_tool_deletes"] is False
+    assert inference_context["confirmed_delete_scope"] is None
+    assert inference_context["confirmed_delete_count"] is None
     assert inference_context["manage_vault"] is False
 
 
@@ -147,7 +153,15 @@ def test_brain_query_adds_all_owner_namespaces_only_for_manager_mode(monkeypatch
         source_app="diary",
         use_memory=False,
         manage_vault=True,
-        context={"manage_vault": False},
+        confirm_tool_deletes=True,
+        confirmed_delete_scope="namespace:apps/health",
+        confirmed_delete_count=3,
+        context={
+            "manage_vault": False,
+            "confirm_tool_deletes": False,
+            "confirmed_delete_scope": "namespace:apps/study",
+            "confirmed_delete_count": 99,
+        },
     )
     result = asyncio.run(
         brain_api.query_brain(
@@ -159,6 +173,9 @@ def test_brain_query_adds_all_owner_namespaces_only_for_manager_mode(monkeypatch
 
     assert result.answer == "Organized"
     assert inference_context["manage_vault"] is True
+    assert inference_context["confirm_tool_deletes"] is True
+    assert inference_context["confirmed_delete_scope"] == "namespace:apps/health"
+    assert inference_context["confirmed_delete_count"] == 3
     assert inference_context["authorized_namespaces"] == [
         "apps/diary",
         "apps/files",
