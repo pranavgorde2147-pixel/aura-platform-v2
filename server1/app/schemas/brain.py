@@ -21,6 +21,8 @@ class BrainQueryRequest(BaseModel):
     source_app: str | None = Field(default=None, max_length=64)
     # Personal vault retrieval is enabled by default.
     use_memory: bool = True
+    # Model-proposed vault writes require this explicit user/app confirmation.
+    confirm_tool_writes: bool = False
     # Backward-compatible input only. Query/answer turns are always stored in
     # the owner's private Brain vault; this legacy flag no longer disables it.
     persist_interaction: bool = Field(

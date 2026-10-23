@@ -309,8 +309,14 @@ async def query_brain(
                 "authorized_memories",
                 "relevant_memories",
                 "known_facts",
+                "authorized_namespaces",
+                "confirm_tool_writes",
+                "source_app",
             }
         }
+        enriched_context["source_app"] = payload.source_app
+        enriched_context["authorized_namespaces"] = namespaces
+        enriched_context["confirm_tool_writes"] = payload.confirm_tool_writes
         authorized_records = [
             {
                 "record_id": item.get("record_id"),

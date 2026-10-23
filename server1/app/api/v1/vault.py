@@ -260,6 +260,32 @@ async def get_record(
     return await _owned_app_record(current_user.id, brain.id, record_id, source_app)
 
 
+@router.get("/records/{record_id}/versions")
+async def list_record_versions(
+    record_id: uuid.UUID,
+    source_app: str,
+    client_app: str | None = None,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """List preserved versions of one record in an authorized app namespace."""
+    await _authorize_record_action(
+        session,
+        current_user,
+        client_app=client_app,
+        source_app=source_app,
+        action="read",
+    )
+    _, brain = await _owned_brain(session, current_user)
+    await _owned_app_record(current_user.id, brain.id, record_id, source_app)
+    return await _call_server2(
+        current_user.id,
+        brain.id,
+        method="GET",
+        path=f"records/{record_id}/versions",
+    )
+
+
 @router.post("/search")
 async def search_records(
     payload: VaultSearchRequest,
