@@ -103,7 +103,7 @@ def test_brain_query_replaces_client_supplied_tool_authorization(monkeypatch):
     assert inference_context["manage_vault"] is False
 
 
-def test_brain_query_adds_all_owner_namespaces_only_for_manager_mode(monkeypatch):
+def test_brain_query_harness_prefix_enables_owner_scoped_management(monkeypatch):
     user_id = uuid.uuid4()
     identity = SimpleNamespace(id=uuid.uuid4(), display_name="Test User")
     brain = SimpleNamespace(id=uuid.uuid4(), provisioning_status="ready")
@@ -157,13 +157,15 @@ def test_brain_query_adds_all_owner_namespaces_only_for_manager_mode(monkeypatch
     monkeypatch.setattr(brain_api, "get_brain_client", FakeBrainClient)
 
     payload = BrainQueryRequest(
-        query="Organize my vault",
+        query="harness: Organize my vault",
         source_app="diary",
         use_memory=False,
-        manage_vault=True,
-        delete_approval_id=uuid.uuid4(),
+        manage_vault=False,
+        confirm_tool_writes=False,
         context={
             "manage_vault": False,
+            "harness_mode": False,
+            "confirm_tool_writes": False,
             "confirm_tool_deletes": False,
             "confirmed_delete_scope": "namespace:apps/study",
             "confirmed_delete_count": 99,
@@ -179,10 +181,12 @@ def test_brain_query_adds_all_owner_namespaces_only_for_manager_mode(monkeypatch
 
     assert result.answer == "Organized"
     assert inference_context["manage_vault"] is True
+    assert inference_context["harness_mode"] is True
+    assert inference_context["confirm_tool_writes"] is True
     assert "confirm_tool_deletes" not in inference_context
     assert "confirmed_delete_scope" not in inference_context
     assert "confirmed_delete_count" not in inference_context
-    assert inference_context["delete_approval_id"] == str(payload.delete_approval_id)
+    assert inference_context["delete_approval_id"] is None
     assert inference_context["authorized_namespaces"] == [
         "apps/diary",
         "apps/files",

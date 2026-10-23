@@ -28,6 +28,7 @@ from app.repositories.ai_identity import AIIdentityRepository
 from app.repositories.personal_ai_brain import PersonalAIBrainRepository
 
 router = APIRouter(prefix="/brain", tags=["Brain"])
+_HARNESS_PREFIX = re.compile(r"^\s*harness\s*:\s*", re.IGNORECASE)
 
 
 async def _vault_brain(session: AsyncSession, user: User):
@@ -152,13 +153,20 @@ async def query_brain(
     session: AsyncSession = Depends(get_db),
 ) -> BrainQueryResponse:
     """Process a user query through their Personal Brain."""
+    harness_mode = _HARNESS_PREFIX.match(payload.query) is not None
+    manage_vault = (
+        payload.manage_vault
+        or harness_mode
+        or payload.delete_approval_id is not None
+        or payload.delete_plan_cancel_id is not None
+    )
     identity = await AIIdentityRepository(session).get_by_user_id(current_user.id)
     brain = (
         await PersonalAIBrainRepository(session).get_by_ai_identity_id(identity.id)
         if identity
         else None
     )
-    if payload.manage_vault and not payload.source_app:
+    if manage_vault and not payload.source_app:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="source_app is required for Brain vault management",
@@ -184,7 +192,7 @@ async def query_brain(
     )
     query_source_app = payload.source_app or "brain"
     namespaces = ["shared"]
-    if payload.manage_vault:
+    if manage_vault:
         connection_service = AppConnectionService(session)
         app_connections = await connection_service.list_connections(current_user)
         namespaces = _management_namespaces(app_connections)
@@ -340,12 +348,15 @@ async def query_brain(
                 "delete_approval_id",
                 "delete_plan_cancel_id",
                 "manage_vault",
+                "harness_mode",
                 "source_app",
             }
         }
         enriched_context["source_app"] = payload.source_app
         enriched_context["authorized_namespaces"] = namespaces
-        enriched_context["confirm_tool_writes"] = payload.confirm_tool_writes
+        enriched_context["confirm_tool_writes"] = (
+            payload.confirm_tool_writes or harness_mode
+        )
         enriched_context["delete_approval_id"] = (
             str(payload.delete_approval_id) if payload.delete_approval_id else None
         )
@@ -354,7 +365,8 @@ async def query_brain(
             if payload.delete_plan_cancel_id
             else None
         )
-        enriched_context["manage_vault"] = payload.manage_vault
+        enriched_context["manage_vault"] = manage_vault
+        enriched_context["harness_mode"] = harness_mode
         authorized_records = [
             {
                 "record_id": item.get("record_id"),
