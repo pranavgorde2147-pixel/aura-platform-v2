@@ -53,6 +53,14 @@ def test_brain_query_replaces_client_supplied_tool_authorization(monkeypatch):
                 "response": "Answer",
                 "source": "server2_brain_runtime",
                 "model": "test-model",
+                "pending_delete_plans": [
+                    {
+                        "plan_id": str(uuid.uuid4()),
+                        "action": "delete_namespace",
+                        "namespace": "apps/health",
+                        "record_count": 3,
+                    }
+                ],
             }
 
     monkeypatch.setattr(
@@ -72,9 +80,7 @@ def test_brain_query_replaces_client_supplied_tool_authorization(monkeypatch):
             "source_app": "health",
             "authorized_namespaces": ["apps/health"],
             "confirm_tool_writes": True,
-            "confirm_tool_deletes": True,
-            "confirmed_delete_scope": "namespace:apps/health",
-            "confirmed_delete_count": 9,
+            "delete_approval_id": str(uuid.uuid4()),
         },
     )
     result = asyncio.run(
@@ -86,12 +92,14 @@ def test_brain_query_replaces_client_supplied_tool_authorization(monkeypatch):
     )
 
     assert result.answer == "Answer"
+    assert result.pending_delete_plans[0]["namespace"] == "apps/health"
     assert inference_context["source_app"] == "diary"
     assert inference_context["authorized_namespaces"] == ["shared"]
     assert inference_context["confirm_tool_writes"] is False
-    assert inference_context["confirm_tool_deletes"] is False
-    assert inference_context["confirmed_delete_scope"] is None
-    assert inference_context["confirmed_delete_count"] is None
+    assert "confirm_tool_deletes" not in inference_context
+    assert "confirmed_delete_scope" not in inference_context
+    assert "confirmed_delete_count" not in inference_context
+    assert inference_context["delete_approval_id"] is None
     assert inference_context["manage_vault"] is False
 
 
@@ -153,9 +161,7 @@ def test_brain_query_adds_all_owner_namespaces_only_for_manager_mode(monkeypatch
         source_app="diary",
         use_memory=False,
         manage_vault=True,
-        confirm_tool_deletes=True,
-        confirmed_delete_scope="namespace:apps/health",
-        confirmed_delete_count=3,
+        delete_approval_id=uuid.uuid4(),
         context={
             "manage_vault": False,
             "confirm_tool_deletes": False,
@@ -173,9 +179,10 @@ def test_brain_query_adds_all_owner_namespaces_only_for_manager_mode(monkeypatch
 
     assert result.answer == "Organized"
     assert inference_context["manage_vault"] is True
-    assert inference_context["confirm_tool_deletes"] is True
-    assert inference_context["confirmed_delete_scope"] == "namespace:apps/health"
-    assert inference_context["confirmed_delete_count"] == 3
+    assert "confirm_tool_deletes" not in inference_context
+    assert "confirmed_delete_scope" not in inference_context
+    assert "confirmed_delete_count" not in inference_context
+    assert inference_context["delete_approval_id"] == str(payload.delete_approval_id)
     assert inference_context["authorized_namespaces"] == [
         "apps/diary",
         "apps/files",

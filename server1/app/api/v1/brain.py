@@ -263,6 +263,8 @@ async def query_brain(
                         tokens_used=metadata.get("tokens_used"),
                         records_used=record_references,
                         persisted_record_id=uuid.UUID(str(prior["record_id"])),
+                        pending_delete_plans=metadata.get("pending_delete_plans") or [],
+                        delete_result=metadata.get("delete_result"),
                     )
                 persisted_record_id = str(prior["record_id"])
                 persisted_record_version = int(prior["version"])
@@ -335,6 +337,8 @@ async def query_brain(
                 "confirm_tool_deletes",
                 "confirmed_delete_scope",
                 "confirmed_delete_count",
+                "delete_approval_id",
+                "delete_plan_cancel_id",
                 "manage_vault",
                 "source_app",
             }
@@ -342,9 +346,14 @@ async def query_brain(
         enriched_context["source_app"] = payload.source_app
         enriched_context["authorized_namespaces"] = namespaces
         enriched_context["confirm_tool_writes"] = payload.confirm_tool_writes
-        enriched_context["confirm_tool_deletes"] = payload.confirm_tool_deletes
-        enriched_context["confirmed_delete_scope"] = payload.confirmed_delete_scope
-        enriched_context["confirmed_delete_count"] = payload.confirmed_delete_count
+        enriched_context["delete_approval_id"] = (
+            str(payload.delete_approval_id) if payload.delete_approval_id else None
+        )
+        enriched_context["delete_plan_cancel_id"] = (
+            str(payload.delete_plan_cancel_id)
+            if payload.delete_plan_cancel_id
+            else None
+        )
         enriched_context["manage_vault"] = payload.manage_vault
         authorized_records = [
             {
@@ -388,6 +397,10 @@ async def query_brain(
                     "tokens_used": inference.get("tokens_used"),
                     "used_records": authorized_records,
                     "interaction_status": "completed",
+                    "pending_delete_plans": inference.get(
+                        "pending_delete_plans", []
+                    ),
+                    "delete_result": inference.get("delete_result"),
                 },
             },
         )
@@ -439,6 +452,8 @@ async def query_brain(
         persisted_record_id=(
             uuid.UUID(str(persisted_record_id)) if persisted_record_id else None
         ),
+        pending_delete_plans=inference.get("pending_delete_plans", []),
+        delete_result=inference.get("delete_result"),
     )
 
 

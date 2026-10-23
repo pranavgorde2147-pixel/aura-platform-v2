@@ -23,10 +23,10 @@ class BrainQueryRequest(BaseModel):
     use_memory: bool = True
     # Model-proposed vault writes require this explicit user/app confirmation.
     confirm_tool_writes: bool = False
-    # Destructive Brain-tool deletes require a separate, per-operation confirmation.
-    confirm_tool_deletes: bool = False
-    confirmed_delete_scope: str | None = Field(default=None, max_length=256)
-    confirmed_delete_count: int | None = Field(default=None, ge=0)
+    # Opaque one-time Server 2 plan approval, bound to the owner, Brain,
+    # source app, target, and expiry.
+    delete_approval_id: uuid.UUID | None = None
+    delete_plan_cancel_id: uuid.UUID | None = None
     # When enabled, the internal Brain may manage records across this owner's
     # connected app namespaces. Writes and deletes remain separately gated.
     manage_vault: bool = False
@@ -81,6 +81,8 @@ class BrainQueryResponse(BaseModel):
     records_used: list[BrainRecordReference] = Field(default_factory=list)
     persisted_memory_id: uuid.UUID | None = None
     persisted_record_id: uuid.UUID | None = None
+    pending_delete_plans: list[dict[str, Any]] = Field(default_factory=list)
+    delete_result: dict[str, Any] | None = None
 
 
 class BrainProvisioningResponse(BaseModel):
