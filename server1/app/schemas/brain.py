@@ -27,6 +27,8 @@ class BrainQueryRequest(BaseModel):
     # source app, target, and expiry.
     delete_approval_id: uuid.UUID | None = None
     delete_plan_cancel_id: uuid.UUID | None = None
+    bulk_replace_approval_id: uuid.UUID | None = None
+    bulk_replace_cancel_id: uuid.UUID | None = None
     # When enabled, the internal Brain may manage records across this owner's
     # connected app namespaces. Writes and deletes remain separately gated.
     manage_vault: bool = False
@@ -83,6 +85,8 @@ class BrainQueryResponse(BaseModel):
     persisted_record_id: uuid.UUID | None = None
     pending_delete_plans: list[dict[str, Any]] = Field(default_factory=list)
     delete_result: dict[str, Any] | None = None
+    pending_bulk_replace_plans: list[dict[str, Any]] = Field(default_factory=list)
+    bulk_replace_result: dict[str, Any] | None = None
 
 
 class BrainProvisioningResponse(BaseModel):

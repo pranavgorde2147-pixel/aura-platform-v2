@@ -159,7 +159,22 @@ async def query_brain(
         or harness_mode
         or payload.delete_approval_id is not None
         or payload.delete_plan_cancel_id is not None
+        or payload.bulk_replace_approval_id is not None
+        or payload.bulk_replace_cancel_id is not None
     )
+    if sum(
+        value is not None
+        for value in (
+            payload.delete_approval_id,
+            payload.delete_plan_cancel_id,
+            payload.bulk_replace_approval_id,
+            payload.bulk_replace_cancel_id,
+        )
+    ) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Submit only one plan approval or cancellation per request",
+        )
     identity = await AIIdentityRepository(session).get_by_user_id(current_user.id)
     brain = (
         await PersonalAIBrainRepository(session).get_by_ai_identity_id(identity.id)
@@ -273,6 +288,10 @@ async def query_brain(
                         persisted_record_id=uuid.UUID(str(prior["record_id"])),
                         pending_delete_plans=metadata.get("pending_delete_plans") or [],
                         delete_result=metadata.get("delete_result"),
+                        pending_bulk_replace_plans=(
+                            metadata.get("pending_bulk_replace_plans") or []
+                        ),
+                        bulk_replace_result=metadata.get("bulk_replace_result"),
                     )
                 persisted_record_id = str(prior["record_id"])
                 persisted_record_version = int(prior["version"])
@@ -347,6 +366,8 @@ async def query_brain(
                 "confirmed_delete_count",
                 "delete_approval_id",
                 "delete_plan_cancel_id",
+                "bulk_replace_approval_id",
+                "bulk_replace_cancel_id",
                 "manage_vault",
                 "harness_mode",
                 "source_app",
@@ -363,6 +384,16 @@ async def query_brain(
         enriched_context["delete_plan_cancel_id"] = (
             str(payload.delete_plan_cancel_id)
             if payload.delete_plan_cancel_id
+            else None
+        )
+        enriched_context["bulk_replace_approval_id"] = (
+            str(payload.bulk_replace_approval_id)
+            if payload.bulk_replace_approval_id
+            else None
+        )
+        enriched_context["bulk_replace_cancel_id"] = (
+            str(payload.bulk_replace_cancel_id)
+            if payload.bulk_replace_cancel_id
             else None
         )
         enriched_context["manage_vault"] = manage_vault
@@ -413,6 +444,10 @@ async def query_brain(
                         "pending_delete_plans", []
                     ),
                     "delete_result": inference.get("delete_result"),
+                    "pending_bulk_replace_plans": inference.get(
+                        "pending_bulk_replace_plans", []
+                    ),
+                    "bulk_replace_result": inference.get("bulk_replace_result"),
                 },
             },
         )
@@ -466,6 +501,10 @@ async def query_brain(
         ),
         pending_delete_plans=inference.get("pending_delete_plans", []),
         delete_result=inference.get("delete_result"),
+        pending_bulk_replace_plans=inference.get(
+            "pending_bulk_replace_plans", []
+        ),
+        bulk_replace_result=inference.get("bulk_replace_result"),
     )
 
 

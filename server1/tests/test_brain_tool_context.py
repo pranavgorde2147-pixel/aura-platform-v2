@@ -149,6 +149,11 @@ def test_brain_query_harness_prefix_enables_owner_scoped_management(monkeypatch)
                 "response": "Organized",
                 "source": "server2_brain_runtime",
                 "model": "test-model",
+                "bulk_replace_result": {
+                    "ok": True,
+                    "record_count": 2,
+                    "occurrence_count": 7,
+                },
             }
 
     monkeypatch.setattr(brain_api, "AIIdentityRepository", FakeIdentityRepository)
@@ -156,12 +161,14 @@ def test_brain_query_harness_prefix_enables_owner_scoped_management(monkeypatch)
     monkeypatch.setattr(brain_api, "AppConnectionService", FakeAppConnectionService)
     monkeypatch.setattr(brain_api, "get_brain_client", FakeBrainClient)
 
+    bulk_plan_id = uuid.uuid4()
     payload = BrainQueryRequest(
         query="harness: Organize my vault",
         source_app="diary",
         use_memory=False,
         manage_vault=False,
         confirm_tool_writes=False,
+        bulk_replace_approval_id=bulk_plan_id,
         context={
             "manage_vault": False,
             "harness_mode": False,
@@ -183,6 +190,12 @@ def test_brain_query_harness_prefix_enables_owner_scoped_management(monkeypatch)
     assert inference_context["manage_vault"] is True
     assert inference_context["harness_mode"] is True
     assert inference_context["confirm_tool_writes"] is True
+    assert inference_context["bulk_replace_approval_id"] == str(bulk_plan_id)
+    assert result.bulk_replace_result == {
+        "ok": True,
+        "record_count": 2,
+        "occurrence_count": 7,
+    }
     assert "confirm_tool_deletes" not in inference_context
     assert "confirmed_delete_scope" not in inference_context
     assert "confirmed_delete_count" not in inference_context
