@@ -104,6 +104,8 @@ def test_aura_core_registry_defaults_identity_and_brain_read():
         (permission.scope, permission.action)
         for permission in aura_core.additional_permissions
     } == {
+        ("memory", "write"),
+        ("aura-core", "delete"),
         ("records", "read"),
         ("records", "write"),
         ("records", "delete"),
@@ -210,7 +212,7 @@ def test_install_rejects_permissions_not_declared_in_registry():
                 "aura-core",
                 permissions=[
                     ModulePermissionSpec(scope="brain", action="read"),
-                    ModulePermissionSpec(scope="memory", action="write"),
+                    ModulePermissionSpec(scope="memory", action="delete"),
                 ],
             )
         )
@@ -257,7 +259,7 @@ def test_update_connection_rejects_unregistered_grants_without_mutating_connecti
                 permissions=[
                     ModulePermissionSpec(scope="identity", action="read"),
                     ModulePermissionSpec(scope="brain", action="read"),
-                    ModulePermissionSpec(scope="memory", action="write"),
+                    ModulePermissionSpec(scope="memory", action="delete"),
                 ],
             )
         )

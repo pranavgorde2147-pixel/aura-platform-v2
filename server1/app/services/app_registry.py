@@ -53,7 +53,10 @@ CATALOG: dict[str, AppDefinition] = {
             ModulePermissionSpec(scope="identity", action="read"),
             ModulePermissionSpec(scope="brain", action="read"),
         ],
-        # Chat is query-only; the app gets no memory-write or routed-record access.
+        additional_permissions=[
+            ModulePermissionSpec(scope="memory", action="write"),
+            ModulePermissionSpec(scope="aura-core", action="delete"),
+        ],
         ingest_scope=None,
         routable=False,
     ),

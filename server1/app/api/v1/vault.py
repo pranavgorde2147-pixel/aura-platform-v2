@@ -79,35 +79,63 @@ async def _authorize_record_action(
     action: str,
 ) -> None:
     caller = client_app or source_app
-    if caller == source_app:
+
+    if action == "read":
         await _require_app_permission(
             session,
             user,
             caller,
-            "files" if caller == "files" else (
-                "memory" if action == "write" else "brain"
-            ),
-            action,
+            "files" if caller == "files" else "brain",
+            "read",
         )
+        if source_app != caller and source_app != "shared":
+            await _require_app_permission(
+                session,
+                user,
+                source_app,
+                "files" if source_app == "files" else "brain",
+                "read",
+            )
         return
 
-    await _require_app_permission(
-        session,
-        user,
-        caller,
-        "memory" if action == "write" else "brain",
-        action,
-    )
-    if source_app != "shared":
+    if action == "write":
+        await _require_app_permission(
+            session, user, caller, "memory", "write"
+        )
+        if source_app == caller:
+            return
+        if caller == "aura-core":
+            await _require_app_permission(
+                session,
+                user,
+                source_app,
+                "files" if source_app == "files" else "brain",
+                "read",
+            )
+            return
         await _require_app_permission(
             session,
             user,
             source_app,
-            "files" if source_app == "files" else (
-                "memory" if action == "write" else "brain"
-            ),
-            action,
+            "memory",
+            "write",
         )
+        return
+
+    if action == "delete":
+        await _require_app_permission(
+            session, user, caller, "memory", "write"
+        )
+        await _require_app_permission(
+            session,
+            user,
+            source_app,
+            "files" if source_app == "files" else source_app,
+            "delete",
+        )
+        return
+
+    raise ValueError(f"Unsupported vault record action: {action}")
 
 
 def _granted_namespaces(caller_app: str, modules: list) -> list[str]:
@@ -361,7 +389,7 @@ async def delete_record(
         current_user,
         client_app=client_app,
         source_app=source_app,
-        action="write",
+        action="delete",
     )
     _, brain = await _owned_brain(session, current_user)
     await _owned_app_record(current_user.id, brain.id, record_id, source_app)

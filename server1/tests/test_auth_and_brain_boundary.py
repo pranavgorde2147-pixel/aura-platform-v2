@@ -121,6 +121,133 @@ def test_cross_app_vault_read_requires_active_reader_and_source_grants(monkeypat
     ]
 
 
+def test_aura_core_cross_app_vault_edit_needs_opt_in_and_source_read(monkeypatch):
+    from app.services.app_registry import AppConnectionService
+
+    grants = {
+        ("aura-core", "memory", "write"),
+        ("diary", "brain", "read"),
+    }
+    checks = []
+
+    async def has_active_permission(self, user, slug, scope, action):
+        checks.append((slug, scope, action))
+        return (slug, scope, action) in grants
+
+    monkeypatch.setattr(
+        AppConnectionService, "has_active_permission", has_active_permission
+    )
+
+    async def run():
+        await _authorize_record_action(
+            object(),
+            object(),
+            client_app="aura-core",
+            source_app="diary",
+            action="write",
+        )
+
+    asyncio.run(run())
+    assert checks == [
+        ("aura-core", "memory", "write"),
+        ("diary", "brain", "read"),
+    ]
+
+    grants.remove(("aura-core", "memory", "write"))
+    checks.clear()
+
+    async def denied():
+        try:
+            await _authorize_record_action(
+                object(),
+                object(),
+                client_app="aura-core",
+                source_app="diary",
+                action="write",
+            )
+        except HTTPException as exc:
+            assert exc.status_code == 403
+        else:
+            raise AssertionError("Core without memory:write must be denied")
+
+    asyncio.run(denied())
+    assert checks == [("aura-core", "memory", "write")]
+
+
+def test_app_vault_edit_and_delete_require_explicit_grants(monkeypatch):
+    from app.services.app_registry import AppConnectionService
+
+    grants = {
+        ("study", "memory", "write"),
+        ("study", "study", "delete"),
+    }
+    checks = []
+
+    async def has_active_permission(self, user, slug, scope, action):
+        checks.append((slug, scope, action))
+        return (slug, scope, action) in grants
+
+    monkeypatch.setattr(
+        AppConnectionService, "has_active_permission", has_active_permission
+    )
+
+    async def run():
+        await _authorize_record_action(
+            object(),
+            object(),
+            client_app="study",
+            source_app="study",
+            action="write",
+        )
+        await _authorize_record_action(
+            object(),
+            object(),
+            client_app="study",
+            source_app="study",
+            action="delete",
+        )
+
+    asyncio.run(run())
+    assert checks == [
+        ("study", "memory", "write"),
+        ("study", "memory", "write"),
+        ("study", "study", "delete"),
+    ]
+
+
+def test_aura_core_cross_app_delete_requires_target_delete_grant(monkeypatch):
+    from app.services.app_registry import AppConnectionService
+
+    grants = {
+        ("aura-core", "memory", "write"),
+        ("study", "study", "delete"),
+    }
+    checks = []
+
+    async def has_active_permission(self, user, slug, scope, action):
+        checks.append((slug, scope, action))
+        return (slug, scope, action) in grants
+
+    monkeypatch.setattr(
+        AppConnectionService, "has_active_permission", has_active_permission
+    )
+
+    async def run():
+        await _authorize_record_action(
+            object(),
+            object(),
+            client_app="aura-core",
+            source_app="study",
+            action="delete",
+        )
+
+    asyncio.run(run())
+    assert checks == [
+        ("aura-core", "memory", "write"),
+        ("study", "study", "delete"),
+    ]
+
+
 def make_user(email: str = "user@example.com") -> User:
     user = User(
         email=email,
