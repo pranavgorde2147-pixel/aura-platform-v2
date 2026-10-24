@@ -129,6 +129,37 @@ def test_infer_forwards_identity_model_and_headers(monkeypatch):
     asyncio.run(_run())
 
 
+def test_harness_uses_deterministic_server2_endpoint(monkeypatch):
+    async def _run():
+        configure(
+            monkeypatch,
+            AI_SERVER_URL="https://brain.example",
+            INTERNAL_API_TOKEN="internal-token",
+            AI_SERVER_MODEL="Qwen3.5-0.8B",
+        )
+        calls = install_client(
+            monkeypatch,
+            [FakeResponse(200, {"supported": True, "response": "Preview ready"})],
+        )
+        client = BrainClient()
+        user_id = str(uuid.uuid4())
+        request_id = str(uuid.uuid4())
+
+        result = await client.harness(
+            user_id,
+            'harness: replace "R" with "C"',
+            {"source_app": "study", "harness_mode": True},
+            request_id=request_id,
+        )
+
+        assert result["supported"] is True
+        assert calls[0]["url"] == "https://brain.example/v1/brain/harness"
+        assert calls[0]["json"]["request_id"] == request_id
+        assert calls[0]["json"]["context"]["harness_mode"] is True
+
+    asyncio.run(_run())
+
+
 def test_provision_forwards_brain_owner_name(monkeypatch):
     async def _run():
         configure(

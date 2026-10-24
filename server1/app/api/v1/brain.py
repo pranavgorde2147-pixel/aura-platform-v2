@@ -432,13 +432,34 @@ async def query_brain(
         if authorized_records:
             enriched_context["authorized_records"] = authorized_records
         start = time.perf_counter()
-        operation = "inference"
-        inference = await client.infer(
-            str(current_user.id),
-            payload.query,
-            enriched_context,
-            request_id=request_id,
+        operation = "Harness"
+        deterministic_harness_request = harness_mode or any(
+            value is not None
+            for value in (
+                payload.delete_approval_id,
+                payload.delete_plan_cancel_id,
+                payload.bulk_replace_approval_id,
+                payload.bulk_replace_cancel_id,
+            )
         )
+        inference = (
+            await client.harness(
+                str(current_user.id),
+                payload.query,
+                enriched_context,
+                request_id=request_id,
+            )
+            if deterministic_harness_request
+            else {"supported": False}
+        )
+        if inference.get("supported") is not True:
+            operation = "inference"
+            inference = await client.infer(
+                str(current_user.id),
+                payload.query,
+                enriched_context,
+                request_id=request_id,
+            )
         answer = str(inference.get("response") or "")
         if not answer:
             raise BrainServiceError(

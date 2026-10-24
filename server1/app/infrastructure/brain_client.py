@@ -222,6 +222,28 @@ class BrainClient:
         url = f"{self.base_url}/v1/brain/infer"
         return await self._post_json(url, payload, headers)
 
+    async def harness(
+        self,
+        user_id: str,
+        query: str,
+        context: dict[str, Any],
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Try a deterministic Harness operation without invoking inference."""
+        if request_id is None:
+            request_id = str(uuid.uuid4())
+        payload = {
+            "user_id": user_id,
+            "query": query,
+            "model": self.model,
+            "request_id": request_id,
+            "context": context,
+        }
+        headers = self._headers(user_id, request_id)
+        return await self._post_json(
+            f"{self.base_url}/v1/brain/harness", payload, headers
+        )
+
     async def provision_brain(
         self,
         *,

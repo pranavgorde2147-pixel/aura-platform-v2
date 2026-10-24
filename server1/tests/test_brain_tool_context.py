@@ -180,6 +180,9 @@ def test_brain_query_harness_prefix_is_scoped_to_calling_app(monkeypatch):
                 }
             return {"record_id": str(uuid.uuid4()), "version": 1}
 
+        async def harness(self, user, query, context, *, request_id):
+            return {"supported": False}
+
         async def infer(self, user, query, context, *, request_id):
             inference_context.update(context)
             return {
