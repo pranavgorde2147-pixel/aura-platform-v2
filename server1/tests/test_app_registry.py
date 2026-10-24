@@ -112,6 +112,36 @@ def test_aura_core_registry_defaults_identity_and_brain_read():
     }
 
 
+def test_notifications_can_query_and_manage_its_own_vault_namespace():
+    catalog = {app.slug: app for app in list_catalog()}
+    notifications = catalog["notifications"]
+
+    assert notifications.queries_brain is True
+    assert {
+        (permission.scope, permission.action)
+        for permission in notifications.default_permissions
+    } >= {
+        ("brain", "read"),
+        ("memory", "write"),
+    }
+    assert {
+        (permission.scope, permission.action)
+        for permission in notifications.additional_permissions
+    } >= {("notifications", "delete")}
+
+
+def test_brain_apps_can_request_own_vault_edit_and_delete_grants():
+    for app in list_catalog():
+        if not app.queries_brain:
+            continue
+        permissions = {
+            (permission.scope, permission.action)
+            for permission in (*app.default_permissions, *app.additional_permissions)
+        }
+        assert ("memory", "write") in permissions, app.slug
+        assert (app.slug, "delete") in permissions, app.slug
+
+
 def test_catalog_endpoints_are_public():
     app = create_app()
     with TestClient(app) as client:
@@ -124,6 +154,10 @@ def test_catalog_endpoints_are_public():
         assert meeting.status_code == 200
         assert meeting.json()["name"] == "AURA Meeting"
         assert meeting.json()["queries_brain"] is True
+
+        notifications = client.get("/api/v1/apps/notifications")
+        assert notifications.status_code == 200
+        assert notifications.json()["queries_brain"] is True
 
         missing = client.get("/api/v1/apps/does-not-exist")
         assert missing.status_code == 404

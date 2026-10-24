@@ -637,8 +637,13 @@ def test_core_apps_are_registered_with_brain_read(client):
             scopes = {(p["scope"], p["action"]) for p in entry["default_permissions"]}
             assert ("brain", "read") in scopes, f"{slug} advertises queries_brain but lacks brain:read"
 
-    # Notification Hub records events but must not read the brain.
-    assert by_slug["notifications"]["queries_brain"] is False
+    assert by_slug["notifications"]["queries_brain"] is True
+    notification_scopes = {
+        (p["scope"], p["action"])
+        for p in by_slug["notifications"]["default_permissions"]
+    }
+    assert ("brain", "read") in notification_scopes
+    assert ("memory", "write") in notification_scopes
 
 
 @pytest.mark.integration

@@ -78,6 +78,9 @@ CATALOG: dict[str, AppDefinition] = {
             ModulePermissionSpec(scope="memory", action="read"),
             ModulePermissionSpec(scope="memory", action="write"),
         ],
+        additional_permissions=[
+            ModulePermissionSpec(scope="brain", action="delete"),
+        ],
         ingest_scope="memory",
         ingest_action="write",
         routable=False,
@@ -127,6 +130,9 @@ CATALOG: dict[str, AppDefinition] = {
             ModulePermissionSpec(scope="brain", action="read"),
             ModulePermissionSpec(scope="memory", action="read"),
             ModulePermissionSpec(scope="memory", action="write"),
+        ],
+        additional_permissions=[
+            ModulePermissionSpec(scope="memory", action="delete"),
         ],
         ingest_scope="memory",
         ingest_action="write",
@@ -318,6 +324,10 @@ CATALOG: dict[str, AppDefinition] = {
             ModulePermissionSpec(scope="timeline", action="read"),
             ModulePermissionSpec(scope="timeline", action="write"),
         ],
+        additional_permissions=[
+            ModulePermissionSpec(scope="memory", action="write"),
+            ModulePermissionSpec(scope="timeline", action="delete"),
+        ],
         ingest_scope="timeline",
         ingest_action="write",
         write_scope="timeline",
@@ -337,15 +347,20 @@ CATALOG: dict[str, AppDefinition] = {
         purpose="Delivery of user notifications triggered by app events.",
         sends_to_aura=["notification events"],
         needs_from_aura=["notifications"],
-        queries_brain=False,
+        queries_brain=True,
         ingests=True,
         default_permissions=[
+            ModulePermissionSpec(scope="brain", action="read"),
+            ModulePermissionSpec(scope="memory", action="write"),
             ModulePermissionSpec(scope="notifications", action="read"),
             ModulePermissionSpec(scope="notifications", action="write"),
         ],
+        additional_permissions=[
+            ModulePermissionSpec(scope="notifications", action="delete"),
+        ],
         ingest_scope="notifications",
         ingest_action="write",
-        # Notification Hub consumes events; it does not store application records.
+        # Notification Hub's records are isolated in its own app namespace.
         routable=False,
     ),
     "workflow": AppDefinition(
@@ -364,6 +379,10 @@ CATALOG: dict[str, AppDefinition] = {
             ModulePermissionSpec(scope="brain", action="read"),
             ModulePermissionSpec(scope="workflow", action="read"),
             ModulePermissionSpec(scope="workflow", action="write"),
+        ],
+        additional_permissions=[
+            ModulePermissionSpec(scope="memory", action="write"),
+            ModulePermissionSpec(scope="workflow", action="delete"),
         ],
         ingest_scope="workflow",
         ingest_action="write",
@@ -391,7 +410,11 @@ CATALOG: dict[str, AppDefinition] = {
             ModulePermissionSpec(scope="memory", action="read"),
             ModulePermissionSpec(scope="files", action="read"),
         ],
-        # Search is read-only.
+        additional_permissions=[
+            ModulePermissionSpec(scope="memory", action="write"),
+            ModulePermissionSpec(scope="search", action="delete"),
+        ],
+        # Search queries are read-only; Vault mutations require extra grants.
         ingest_scope=None,
         routable=False,
     ),
@@ -411,6 +434,10 @@ CATALOG: dict[str, AppDefinition] = {
             ModulePermissionSpec(scope="brain", action="read"),
             ModulePermissionSpec(scope="knowledge", action="read"),
             ModulePermissionSpec(scope="knowledge", action="write"),
+        ],
+        additional_permissions=[
+            ModulePermissionSpec(scope="memory", action="write"),
+            ModulePermissionSpec(scope="knowledge-graph", action="delete"),
         ],
         ingest_scope="knowledge",
         ingest_action="write",
@@ -437,6 +464,10 @@ CATALOG: dict[str, AppDefinition] = {
             ModulePermissionSpec(scope="brain", action="read"),
             ModulePermissionSpec(scope="knowledge", action="read"),
             ModulePermissionSpec(scope="timeline", action="write"),
+        ],
+        additional_permissions=[
+            ModulePermissionSpec(scope="memory", action="write"),
+            ModulePermissionSpec(scope="chronos", action="delete"),
         ],
         # Chronos is a platform-family marker with no running service yet.
         ingest_scope=None,
