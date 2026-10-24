@@ -4,6 +4,9 @@ import asyncio
 import uuid
 from types import SimpleNamespace
 
+import pytest
+from fastapi import HTTPException
+
 from app.api.v1 import brain as brain_api
 from app.schemas.brain import BrainQueryRequest
 
@@ -103,7 +106,7 @@ def test_brain_query_replaces_client_supplied_tool_authorization(monkeypatch):
     assert inference_context["manage_vault"] is False
 
 
-def test_brain_query_harness_prefix_enables_owner_scoped_management(monkeypatch):
+def test_brain_query_harness_prefix_is_scoped_to_calling_app(monkeypatch):
     user_id = uuid.uuid4()
     identity = SimpleNamespace(id=uuid.uuid4(), display_name="Test User")
     brain = SimpleNamespace(id=uuid.uuid4(), provisioning_status="ready")
@@ -131,16 +134,50 @@ def test_brain_query_harness_prefix_enables_owner_scoped_management(monkeypatch)
             assert app_slug == "diary"
             return True
 
+        @staticmethod
+        def has_permission(module, scope, action):
+            return (scope, action) in module.permissions
+
         async def list_connections(self, user):
             assert user.id == user_id
             return [
-                SimpleNamespace(module_slug="diary"),
-                SimpleNamespace(module_slug="files"),
-                SimpleNamespace(module_slug="study", is_active=False),
+                SimpleNamespace(
+                    module_slug="diary",
+                    is_active=True,
+                    permissions={("brain", "read")},
+                ),
+                SimpleNamespace(
+                    module_slug="files",
+                    is_active=True,
+                    permissions={("files", "read")},
+                ),
+                SimpleNamespace(
+                    module_slug="study",
+                    is_active=True,
+                    permissions={("brain", "read")},
+                ),
+                SimpleNamespace(
+                    module_slug="health",
+                    is_active=False,
+                    permissions={("brain", "read")},
+                ),
             ]
 
     class FakeBrainClient:
         async def vault_request(self, **kwargs):
+            if kwargs["path"] == "search":
+                search_request.update(kwargs)
+                return {
+                    "results": [
+                        {
+                            "record_id": str(uuid.uuid4()),
+                            "source_app": "study",
+                            "record_type": "study_record",
+                            "source_reference": "lecture-1",
+                            "content": "The study record is read-only context.",
+                        }
+                    ]
+                }
             return {"record_id": str(uuid.uuid4()), "version": 1}
 
         async def infer(self, user, query, context, *, request_id):
@@ -161,11 +198,12 @@ def test_brain_query_harness_prefix_enables_owner_scoped_management(monkeypatch)
     monkeypatch.setattr(brain_api, "AppConnectionService", FakeAppConnectionService)
     monkeypatch.setattr(brain_api, "get_brain_client", FakeBrainClient)
 
+    search_request = {}
     bulk_plan_id = uuid.uuid4()
     payload = BrainQueryRequest(
         query="harness: Organize my vault",
         source_app="diary",
-        use_memory=False,
+        use_memory=True,
         manage_vault=False,
         confirm_tool_writes=False,
         bulk_replace_approval_id=bulk_plan_id,
@@ -187,7 +225,7 @@ def test_brain_query_harness_prefix_enables_owner_scoped_management(monkeypatch)
     )
 
     assert result.answer == "Organized"
-    assert inference_context["manage_vault"] is True
+    assert inference_context["manage_vault"] is False
     assert inference_context["harness_mode"] is True
     assert inference_context["confirm_tool_writes"] is True
     assert inference_context["bulk_replace_approval_id"] == str(bulk_plan_id)
@@ -200,11 +238,32 @@ def test_brain_query_harness_prefix_enables_owner_scoped_management(monkeypatch)
     assert "confirmed_delete_scope" not in inference_context
     assert "confirmed_delete_count" not in inference_context
     assert inference_context["delete_approval_id"] is None
-    assert inference_context["authorized_namespaces"] == [
+    assert inference_context["authorized_namespaces"] == ["apps/diary"]
+    assert set(search_request["json_body"]["namespaces"]) == {
         "apps/diary",
-        "apps/files",
         "apps/study",
         "conversations",
         "documents",
         "shared",
-    ]
+    }
+    assert "apps/health" not in search_request["json_body"]["namespaces"]
+    assert inference_context["authorized_records"][0]["source_app"] == "study"
+
+
+def test_non_core_app_cannot_enable_whole_vault_management():
+    payload = BrainQueryRequest(
+        query="Organize my vault",
+        source_app="diary",
+        manage_vault=True,
+    )
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(
+            brain_api.query_brain(
+                payload,
+                current_user=SimpleNamespace(id=uuid.uuid4()),
+                session=object(),
+            )
+        )
+
+    assert error.value.status_code == 403

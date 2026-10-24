@@ -154,7 +154,7 @@ async def query_brain(
 ) -> BrainQueryResponse:
     """Process a user query through their Personal Brain."""
     harness_mode = _HARNESS_PREFIX.match(payload.query) is not None
-    manage_vault = (
+    management_request = (
         payload.manage_vault
         or harness_mode
         or payload.delete_approval_id is not None
@@ -175,17 +175,22 @@ async def query_brain(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Submit only one plan approval or cancellation per request",
         )
+    if management_request and not payload.source_app:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="source_app is required for Brain vault management",
+        )
+    if payload.manage_vault and payload.source_app != "aura-core":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Whole-vault management is available only to AURA Core",
+        )
     identity = await AIIdentityRepository(session).get_by_user_id(current_user.id)
     brain = (
         await PersonalAIBrainRepository(session).get_by_ai_identity_id(identity.id)
         if identity
         else None
     )
-    if manage_vault and not payload.source_app:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="source_app is required for Brain vault management",
-        )
     if payload.source_app:
         authorized = await AppConnectionService(session).has_active_permission(
             current_user, payload.source_app, scope="brain", action="read"
@@ -207,14 +212,30 @@ async def query_brain(
     )
     query_source_app = payload.source_app or "brain"
     namespaces = ["shared"]
-    if manage_vault:
-        connection_service = AppConnectionService(session)
-        app_connections = await connection_service.list_connections(current_user)
-        namespaces = _management_namespaces(app_connections)
+    # Harness tool access stays app-local; query retrieval can still provide
+    # separately authorized cross-app records as read-only context.
+    search_namespaces = namespaces
+    if management_request:
+        if payload.manage_vault:
+            connection_service = AppConnectionService(session)
+            app_connections = await connection_service.list_connections(current_user)
+            namespaces = _management_namespaces(app_connections)
+            search_namespaces = namespaces
+        elif payload.source_app:
+            namespaces = [f"apps/{payload.source_app}"]
+            search_namespaces = (
+                _query_namespaces(
+                    payload.source_app,
+                    await AppConnectionService(session).list_connections(current_user),
+                )
+                if payload.use_memory
+                else namespaces
+            )
     elif payload.use_memory:
         connection_service = AppConnectionService(session)
         app_connections = await connection_service.list_connections(current_user)
         namespaces = _query_namespaces(payload.source_app, app_connections)
+        search_namespaces = namespaces
     client = get_brain_client()
     records: list[dict] = []
     operation = "vault operation"
@@ -337,7 +358,7 @@ async def query_brain(
                 json_body={
                     "query": payload.query,
                     "limit": payload.memory_limit,
-                    "namespaces": sorted(set(namespaces)),
+                    "namespaces": sorted(set(search_namespaces)),
                 },
             )
             records = search_result.get("results", [])
@@ -396,7 +417,7 @@ async def query_brain(
             if payload.bulk_replace_cancel_id
             else None
         )
-        enriched_context["manage_vault"] = manage_vault
+        enriched_context["manage_vault"] = payload.manage_vault
         enriched_context["harness_mode"] = harness_mode
         authorized_records = [
             {
