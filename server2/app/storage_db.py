@@ -76,30 +76,6 @@ class Base(DeclarativeBase):
     """Declarative base for storage metadata models."""
 
 
-class StoredObject(Base):
-    """Metadata record for a single stored object."""
-
-    __tablename__ = "stored_objects"
-
-    id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
-    owner_id: Mapped[uuid.UUID] = mapped_column(GUID(), index=True, nullable=False)
-    ai_identity_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), index=True, nullable=True)
-    # The Brain that owns the object. Objects uploaded for a Brain are always
-    # written under that Brain's vault prefix.
-    brain_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), index=True, nullable=True)
-    object_key: Mapped[str] = mapped_column(String(1024), nullable=False, unique=True)
-    filename: Mapped[str] = mapped_column(String(512), nullable=False)
-    content_type: Mapped[str] = mapped_column(String(255), nullable=False, default="application/octet-stream")
-    size_bytes: Mapped[int] = mapped_column(nullable=False)
-    checksum_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
-    storage_backend: Mapped[str] = mapped_column(String(32), nullable=False, default="local")
-    source_app: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
-    )
-    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-
-
 class ManagedBrain(Base):
     """Server 2 registry for service-provisioned, owner-isolated Brain spaces.
 

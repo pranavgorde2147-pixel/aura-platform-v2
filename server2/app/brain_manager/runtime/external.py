@@ -6,7 +6,8 @@ runtime handle: its own identifier, its own inference context, its own runtime
 cache and its own concurrency limit.
 
 What is *not* isolated is the underlying model weights, because they live at
-the provider. The runtime therefore reports
+the provider. This mode therefore does not satisfy a requirement for private
+per-user local model weights. The runtime reports
 ``isolation="context_isolated_shared_weights"`` and the registry records the
 same value. This is stated explicitly so that no caller believes the Brain has
 a private model.
@@ -109,7 +110,13 @@ class ExternalProviderRuntimeAdapter:
         self.model_id = model_id
         self.max_context_tokens = max_context_tokens
 
-    def create(self, *, brain_id: uuid.UUID, runtime_id: str) -> BrainRuntimeHandle:
+    def create(
+        self,
+        *,
+        brain_id: uuid.UUID,
+        runtime_id: str,
+        resource_root: str | None = None,
+    ) -> BrainRuntimeHandle:
         return ExternalProviderRuntime(
             brain_id=brain_id,
             runtime_id=runtime_id,

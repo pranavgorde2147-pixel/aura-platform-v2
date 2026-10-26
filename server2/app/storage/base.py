@@ -45,6 +45,17 @@ def get_object_store() -> ObjectStore:
     return LocalObjectStore(root=settings.resolved_local_root)
 
 
+def get_brain_object_store(brain) -> ObjectStore:
+    """Resolve object bytes beneath one trusted Brain's private object root."""
+    from app.storage_config import get_settings
+    from app.storage.local import LocalObjectStore
+    from app.brain_manager.vault.storage import get_brain_vault_storage
+
+    if get_settings().backend == "s3":
+        return get_cached_object_store()
+    return LocalObjectStore(root=get_brain_vault_storage().object_directory(brain))
+
+
 _object_store: ObjectStore | None = None
 
 
@@ -60,3 +71,12 @@ def reset_object_store() -> None:
     """Clear the cached backend (used by tests)."""
     global _object_store
     _object_store = None
+
+
+__all__ = [
+    "ObjectStore",
+    "get_brain_object_store",
+    "get_cached_object_store",
+    "get_object_store",
+    "reset_object_store",
+]

@@ -9,6 +9,7 @@ storage engine lives inside Server 2.
 from __future__ import annotations
 
 import os
+import uuid
 from uuid import uuid4
 
 import pytest
@@ -54,11 +55,25 @@ def auth_headers():
 
 
 def _upload(client, headers, owner_id, content=b"hello world", filename="note.txt", content_type="text/plain"):
+    parsed_owner = uuid.UUID(owner_id)
+    brain_id = uuid.uuid5(uuid.NAMESPACE_URL, f"aura-test-brain:{parsed_owner}")
+    identity_id = uuid.uuid5(uuid.NAMESPACE_URL, f"aura-test-identity:{parsed_owner}")
+    provision = client.post(
+        "/v1/brains/provision",
+        headers=headers,
+        json={
+            "brain_id": str(brain_id),
+            "owner_id": str(parsed_owner),
+            "ai_identity_id": str(identity_id),
+            "model_id": "Qwen3.5-0.8B",
+        },
+    )
+    assert provision.status_code == 200, provision.text
     return client.post(
         "/v1/objects",
         headers={**headers, "X-Aura-Owner-Id": owner_id},
         files={"file": (filename, content, content_type)},
-        data={"source_app": "test"},
+        data={"source_app": "test", "ai_identity_id": str(identity_id)},
     )
 
 

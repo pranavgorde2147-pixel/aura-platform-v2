@@ -27,6 +27,7 @@ from app.api.brains import router as brains_router
 from app.api.objects import router as objects_router
 from app.api.storage_health import router as storage_health_router
 from app.storage_db import dispose_engine, init_models
+from app.brain_manager.vault.storage import dispose_brain_vault_storage
 
 logger = logging.getLogger(__name__)
 
@@ -68,3 +69,4 @@ async def startup_storage() -> None:
 @app.on_event("shutdown")
 async def shutdown_storage() -> None:
     await dispose_engine()
+    await dispose_brain_vault_storage()

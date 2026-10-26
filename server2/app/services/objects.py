@@ -7,12 +7,14 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import BinaryIO
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.storage_config import get_settings
-from app.storage_db import ManagedBrain, StoredObject
-from app.storage.base import ObjectStore
+from app.brain_manager.db_models import StoredObject
+from app.brain_manager.vault.storage import get_brain_vault_storage
+from app.storage_db import ManagedBrain
+from app.storage.base import ObjectStore, get_brain_object_store
 
 
 class ObjectLimitExceeded(Exception):
@@ -58,7 +60,7 @@ async def store_object(
 ) -> StoredObject:
     """Validate and persist an object, returning its metadata record."""
     settings = get_settings()
-    brain_id = None
+    brain = None
     if ai_identity_id is not None:
         brain_result = await session.execute(
             select(ManagedBrain).where(
@@ -70,7 +72,18 @@ async def store_object(
         brain = brain_result.scalars().first()
         if brain is None:
             raise PermissionError("AI identity is not provisioned for this owner")
-        brain_id = brain.brain_id
+    else:
+        brain_result = await session.execute(
+            select(ManagedBrain).where(
+                ManagedBrain.owner_id == owner_id,
+                ManagedBrain.provisioning_status == "ready",
+            )
+        )
+        brain = brain_result.scalars().first()
+
+    if brain is None:
+        raise PermissionError("A provisioned Brain is required for private object storage")
+    brain_id = brain.brain_id
 
     if settings.allowed_content_types and content_type not in settings.allowed_content_types:
         raise UnsupportedContentType(content_type)
@@ -85,6 +98,7 @@ async def store_object(
 
     object_id = uuid.uuid4()
     key = object_key(owner_id, object_id, brain_id)
+    target_store = get_brain_object_store(brain)
 
     expires_at = None
     if settings.default_retention_days > 0:
@@ -102,17 +116,36 @@ async def store_object(
         content_type=content_type or "application/octet-stream",
         size_bytes=size,
         checksum_sha256=checksum,
-        storage_backend=store.name,
+        storage_backend=target_store.name,
         source_app=source_app,
         expires_at=expires_at,
     )
 
-    # Persist the blob first; only write the DB row once the bytes are durable.
-    store.save(key, stream, size)
-    session.add(record)
-    await session.commit()
-    await session.refresh(record)
+    target_store.save(key, stream, size)
+    try:
+        async with get_brain_vault_storage().session(brain) as vault_session:
+            vault_session.add(record)
+            await vault_session.commit()
+    except Exception:
+        target_store.delete(key)
+        raise
     return record
+
+
+async def object_store_for_record(
+    session: AsyncSession, record: StoredObject, fallback: ObjectStore
+) -> ObjectStore:
+    """Resolve the private object location through the trusted registry row."""
+    result = await session.execute(
+        select(ManagedBrain).where(
+            ManagedBrain.brain_id == record.brain_id,
+            ManagedBrain.owner_id == record.owner_id,
+        )
+    )
+    brain = result.scalars().first()
+    if brain is None:
+        raise PermissionError("Object Brain is not provisioned for this owner")
+    return get_brain_object_store(brain)
 
 
 async def get_object(
@@ -121,14 +154,25 @@ async def get_object(
     owner_id: uuid.UUID,
     object_id: uuid.UUID,
 ) -> StoredObject | None:
-    """Fetch an object's metadata, enforcing ownership."""
-    result = await session.execute(
-        select(StoredObject).where(
-            StoredObject.id == object_id,
-            StoredObject.owner_id == owner_id,
+    """Fetch an object's metadata from the owner's Brain vault."""
+    brain_result = await session.execute(
+        select(ManagedBrain).where(
+            ManagedBrain.owner_id == owner_id,
+            ManagedBrain.provisioning_status == "ready",
         )
     )
-    return result.scalars().first()
+    brain = brain_result.scalars().first()
+    if brain is None:
+        return None
+    async with get_brain_vault_storage().session(brain) as vault_session:
+        result = await vault_session.execute(
+            select(StoredObject).where(
+                StoredObject.id == object_id,
+                StoredObject.owner_id == owner_id,
+                StoredObject.brain_id == brain.brain_id,
+            )
+        )
+        return result.scalars().first()
 
 
 async def list_objects(
@@ -138,15 +182,28 @@ async def list_objects(
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[StoredObject], int]:
-    """List objects owned by ``owner_id`` with pagination."""
-    base = select(StoredObject).where(StoredObject.owner_id == owner_id)
-    total = await session.scalar(
-        select(func.count()).select_from(base.subquery())
+    """List object metadata from the owner's private Brain vault."""
+    brain_result = await session.execute(
+        select(ManagedBrain).where(
+            ManagedBrain.owner_id == owner_id,
+            ManagedBrain.provisioning_status == "ready",
+        )
     )
-    result = await session.execute(
-        base.order_by(StoredObject.created_at.desc()).limit(limit).offset(offset)
-    )
-    return list(result.scalars().all()), int(total or 0)
+    brain = brain_result.scalars().first()
+    if brain is None:
+        return [], 0
+    async with get_brain_vault_storage().session(brain) as vault_session:
+        base = select(StoredObject).where(
+            StoredObject.owner_id == owner_id,
+            StoredObject.brain_id == brain.brain_id,
+        )
+        total = await vault_session.scalar(
+            select(func.count()).select_from(base.subquery())
+        )
+        result = await vault_session.execute(
+            base.order_by(StoredObject.created_at.desc()).limit(limit).offset(offset)
+        )
+        return list(result.scalars().all()), int(total or 0)
 
 
 async def delete_object(
@@ -160,7 +217,24 @@ async def delete_object(
     record = await get_object(session, owner_id=owner_id, object_id=object_id)
     if record is None:
         return False
-    store.delete(record.object_key)
-    await session.delete(record)
-    await session.commit()
+    target_store = await object_store_for_record(session, record, store)
+    target_store.delete(record.object_key)
+    brain_result = await session.execute(
+        select(ManagedBrain).where(
+            ManagedBrain.brain_id == record.brain_id,
+            ManagedBrain.owner_id == owner_id,
+        )
+    )
+    brain = brain_result.scalars().first()
+    if brain is None:
+        raise PermissionError("Object Brain is not provisioned for this owner")
+    async with get_brain_vault_storage().session(brain) as vault_session:
+        await vault_session.execute(
+            delete(StoredObject).where(
+                StoredObject.id == record.id,
+                StoredObject.brain_id == brain.brain_id,
+                StoredObject.owner_id == owner_id,
+            )
+        )
+        await vault_session.commit()
     return True

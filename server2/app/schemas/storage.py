@@ -29,6 +29,8 @@ class ObjectMetadata(BaseModel):
     source_app: str | None = None
     created_at: datetime
     expires_at: datetime | None = None
+    extracted_text: str | None = None
+    extraction_status: str | None = None
 
 
 class ObjectListResponse(BaseModel):

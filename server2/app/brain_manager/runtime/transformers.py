@@ -1,10 +1,4 @@
-"""Transformers runtime adapter: one dedicated transformers runtime per Brain.
-
-Each Brain gets its own ``AutoModelForCausalLM`` instance, so the weights are
-not shared between Brains. That is the strongest isolation available, but it
-also costs the most memory; the compute capacity manager exists precisely to
-keep the number of concurrently live runtimes inside the deployment's budget.
-"""
+"""Transformers runtime adapter with private model weights and context per Brain."""
 
 from __future__ import annotations
 
@@ -18,6 +12,7 @@ from app.brain_manager.runtime.base import (
     RuntimeHealth,
     RuntimeProvisioningError,
 )
+from app.brain_manager.runtime.artifacts import model_artifact_for_brain
 
 
 def build_quantization_config(mode: str | None):
@@ -47,7 +42,7 @@ def build_quantization_config(mode: str | None):
 class TransformersRuntime:
     """A dedicated transformers runtime bound to one Brain."""
 
-    isolation = "dedicated_weights"
+    isolation = "dedicated_runtime_per_brain_weights"
 
     def __init__(
         self,
@@ -194,7 +189,7 @@ class TransformersRuntimeAdapter:
     """Creates one dedicated transformers runtime per Brain."""
 
     name = "transformers"
-    isolation = "dedicated_weights"
+    isolation = "dedicated_runtime_per_brain_weights"
     provider = "local"
 
     def __init__(
@@ -208,13 +203,29 @@ class TransformersRuntimeAdapter:
         self.quantization = quantization
         self.max_context_tokens = max_context_tokens
 
-    def create(self, *, brain_id: uuid.UUID, runtime_id: str) -> BrainRuntimeHandle:
+    def create(
+        self,
+        *,
+        brain_id: uuid.UUID,
+        runtime_id: str,
+        resource_root: str | None = None,
+    ) -> BrainRuntimeHandle:
+        model_path, brain_has_private_weights = model_artifact_for_brain(
+            self.model_path,
+            brain_id=brain_id,
+            resource_root=resource_root,
+        )
         runtime = TransformersRuntime(
             brain_id=brain_id,
             runtime_id=runtime_id,
-            model_path=self.model_path,
+            model_path=model_path,
             quantization=self.quantization,
             max_context_tokens=self.max_context_tokens,
+        )
+        runtime.isolation = (
+            "dedicated_runtime_per_brain_weights"
+            if brain_has_private_weights
+            else "dedicated_runtime_shared_weights"
         )
         runtime.load()
         return runtime

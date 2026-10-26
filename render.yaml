@@ -3,7 +3,7 @@ services:
   - type: web
     name: aura-server1a-core
     runtime: docker
-    repo: https://github.com/pranavgorde2147-pixel/aura-platform-v2
+    repo: https://github.com/pranavgorde2147-pixel/aura-platform
     dockerContext: ./server1
     dockerfilePath: ./server1/Dockerfile
     healthCheckPath: /api/v1/health
@@ -35,7 +35,7 @@ services:
       - key: AI_SERVER_URL
         sync: false
       # Storage API origin (Server 2). Must include the scheme, e.g.
-      # https://aura-server2.onrender.com or https://aura-server2:8001
+      # https://<your-cloudflare-tunnel-hostname>
       - key: STORAGE_SERVER_URL
         sync: false
       - key: STORAGE_API_TOKEN
@@ -47,53 +47,3 @@ services:
         sync: false
       - key: CORS_ALLOWED_ORIGINS
         sync: false
-
-  # ============ Server 2 - AURA Brain (inference + memory + object storage) ============
-  # This service hosts the /v1/brain/infer API and
-  # also the /v1/objects storage API (Server 1 points STORAGE_SERVER_URL here).
-  # It runs with AURA_SKIP_MODEL_LOAD=1 using the external Groq provider on Render;
-  # the local GGUF (Qwen3.5-0.8B) runs on the GPU laptop and must be reached
-  # through a secure private tunnel, not localhost.
-  - type: web
-    name: aura-server2
-    runtime: docker
-    repo: https://github.com/pranavgorde2147-pixel/aura-platform-v2
-    dockerContext: ./server2
-    dockerfilePath: ./server2/Dockerfile
-    healthCheckPath: /health
-    dockerCommand: "python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT"
-    envVars:
-      - key: MODEL_NAME
-        value: qwen/qwen3.8-27b
-      - key: AURA_SKIP_MODEL_LOAD
-        value: "1"
-      - key: EXTERNAL_AI_URL
-        value: https://api.groq.com/openai/v1
-      - key: EXTERNAL_MODEL
-        value: qwen/qwen3.8-27b
-      - key: MAX_NEW_TOKENS
-        value: "2048"
-      - key: TEMPERATURE
-        value: "0.6"
-      - key: TOP_P
-        value: "0.95"
-      - key: STORAGE_BACKEND
-        value: local
-      - key: STORAGE_DATA_DIR
-        value: /var/data
-      - key: STORAGE_LOCAL_ROOT
-        value: /var/data/objects
-      - key: STORAGE_DATABASE_URL
-        value: sqlite+aiosqlite:////var/data/storage.db
-      # Set values in the Render dashboard (secrets never committed). When
-      # deployed on Render, INTERNAL_API_TOKEN must match Server 1's value.
-      - key: INTERNAL_API_TOKEN
-        sync: false
-      - key: STORAGE_API_TOKEN
-        sync: false
-      - key: EXTERNAL_AI_KEY
-        sync: false
-    disk:
-      name: aura-server2-data
-      mountPath: /var/data
-      sizeGB: 10

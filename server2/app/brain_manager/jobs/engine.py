@@ -186,9 +186,11 @@ class BrainProcessingEngine:
                 break
             result = await self.run_job(session, brain, job)
             if result.get("status") == "error":
-                await queue.fail(job, error_code=str(result.get("error_code", "error")))
+                await queue.fail(
+                    brain, job, error_code=str(result.get("error_code", "error"))
+                )
             else:
-                await queue.complete(job, result_payload=result)
+                await queue.complete(brain, job, result_payload=result)
             results.append(result)
         return results
 

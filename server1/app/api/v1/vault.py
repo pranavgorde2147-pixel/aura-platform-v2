@@ -46,6 +46,7 @@ class VaultSearchRequest(BaseModel):
     source_app: str
     query: str = Field(min_length=1, max_length=4000)
     limit: int = Field(default=10, ge=1, le=50)
+    namespace: str | None = Field(default=None, min_length=1, max_length=160)
 
 
 async def _owned_brain(session: AsyncSession, user: User):
@@ -329,6 +330,21 @@ async def search_records(
         "read",
     )
     _, brain = await _owned_brain(session, current_user)
+    if payload.namespace is not None:
+        expected_namespace = (
+            "documents" if payload.source_app == "files"
+            else f"apps/{payload.source_app}"
+        )
+        if payload.namespace != expected_namespace:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Search namespace must match the authorized source application",
+            )
+        namespaces = [payload.namespace]
+    else:
+        namespaces = await _readable_namespaces(
+            session, current_user, payload.source_app
+        )
     return await _call_server2(
         current_user.id,
         brain.id,
@@ -337,9 +353,7 @@ async def search_records(
         json_body={
             "query": payload.query,
             "limit": payload.limit,
-            "namespaces": await _readable_namespaces(
-                session, current_user, payload.source_app
-            ),
+            "namespaces": namespaces,
         },
     )
 

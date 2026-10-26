@@ -1,5 +1,6 @@
 # Ignore the local large model directory so it is never copied into the image build context.
 models/
+*.gguf
 **/__pycache__/
 **/*.pyc
 .venv/

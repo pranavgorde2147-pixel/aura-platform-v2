@@ -26,8 +26,6 @@ from app.brain_manager.runtime.base import (
     RuntimeHealth,
     RuntimeProvisioningError,
 )
-
-
 @runtime_checkable
 class RuntimeAdapter(Protocol):
     """Creates one dedicated runtime per Brain."""
@@ -36,7 +34,13 @@ class RuntimeAdapter(Protocol):
     isolation: str
     provider: str
 
-    def create(self, *, brain_id: uuid.UUID, runtime_id: str) -> BrainRuntimeHandle: ...
+    def create(
+        self,
+        *,
+        brain_id: uuid.UUID,
+        runtime_id: str,
+        resource_root: str | None = None,
+    ) -> BrainRuntimeHandle: ...
 
 
 def resolve_model_path(config: BrainManagerConfig) -> Path:
@@ -44,7 +48,14 @@ def resolve_model_path(config: BrainManagerConfig) -> Path:
     configured = config.model_path.strip()
     if configured:
         return Path(configured)
-    return Path("/models") / f"{config.model_name}-Q4_K_M.gguf"
+    filename = f"{config.model_name}-Q4_K_M.gguf"
+    server2_root = Path(__file__).resolve().parents[3]
+    candidates = (
+        Path("/models") / filename,
+        server2_root / "models" / filename,
+        server2_root / filename,
+    )
+    return next((candidate for candidate in candidates if candidate.exists()), candidates[0])
 
 
 def build_runtime_adapter(config: BrainManagerConfig) -> RuntimeAdapter:

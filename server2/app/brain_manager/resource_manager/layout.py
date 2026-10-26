@@ -1,11 +1,8 @@
-"""The logical resource layout of one Brain.
+"""The resource layout of one Brain.
 
-The tree below is the *logical* organisation of a Brain's resources. It is a
-manifest, not a promise that a directory with those names exists on disk: the
-actual bytes live in the metadata database, the object store and the vector
-index. Where a physical directory is genuinely useful (runtime scratch space,
-manifest files, job artefacts) it is created through the trusted path helpers
-in :mod:`app.brain_manager.resource_manager.paths`.
+Brain-owned directories and the manifest are created beneath each registered
+resource root. Runtime processes and shared artifacts are represented as
+references rather than copied into the tree.
 """
 
 from __future__ import annotations
@@ -27,7 +24,7 @@ class ResourceNode:
     """One node of the logical Brain resource tree."""
 
     path: str
-    kind: str  # "manifest" | "config" | "runtime" | "index" | "collection" | "directory"
+    kind: str  # "manifest" | "config" | "runtime" | "index" | "collection" | "directory" | "reference"
     backend: str  # "database" | "object_store" | "vector_index" | "filesystem" | "process"
     description: str
     children: tuple["ResourceNode", ...] = field(default_factory=tuple)
@@ -80,6 +77,12 @@ BRAIN_RESOURCE_TREE: ResourceNode = _node(
             "logical",
             "The Brain's own language-model resources.",
             children=(
+                _node(
+                    "personal_llm/model_weights",
+                    "reference",
+                    "filesystem",
+                    "Existing Brain-local weights are preferred; otherwise this references the configured artifact.",
+                ),
                 _node("personal_llm/model_config.json", "config", "filesystem", "Model configuration."),
                 _node(
                     "personal_llm/runtime_metadata.json",
@@ -154,35 +157,33 @@ BRAIN_RESOURCE_TREE: ResourceNode = _node(
             ),
         ),
         _node(
-            "vector_engine",
+            "memory_vault",
             "directory",
-            "logical",
-            "This Brain's own vector index and retrieval configuration.",
+            "filesystem",
+            "Private SQLite vault directory for this Brain.",
             children=(
-                _node("vector_engine/embeddings", "collection", "database", "Embedding chunks."),
-                _node("vector_engine/vector_index", "index", "vector_index", "Private vector space."),
-                _node("vector_engine/retrieval_config.json", "config", "filesystem", "Retrieval config."),
+                _node(
+                    "memory_vault/vault.sqlite",
+                    "file",
+                    "database",
+                    "This Brain's private records, memories, relationships, embeddings, jobs, conversations and object metadata.",
+                ),
             ),
         ),
         _node(
-            "personal_vault",
+            "objects",
             "directory",
-            "logical",
-            "This Brain's isolated personal storage vault.",
+            "object_store",
+            "Only this Brain's uploaded document/object bytes.",
             children=(
-                _node("personal_vault/records", "collection", "database", "Vault records."),
-                _node("personal_vault/documents", "collection", "object_store", "Vault documents."),
-                _node("personal_vault/audio", "collection", "object_store", "Vault audio objects."),
-                _node("personal_vault/images", "collection", "object_store", "Vault image objects."),
-                _node(
-                    "personal_vault/structured_data",
-                    "collection",
-                    "database",
-                    "Structured vault data.",
-                ),
-                _node("personal_vault/metadata", "collection", "database", "Vault metadata."),
-                _node("personal_vault/relationships", "collection", "database", "Vault relationships."),
+                _node("objects/<object-key>", "file", "filesystem", "An object stored for this Brain."),
             ),
+        ),
+        _node(
+            "indexes",
+            "directory",
+            "filesystem",
+            "Brain-local derived indexes; canonical embeddings remain in vault.sqlite.",
         ),
         _node(
             "connected_apps",

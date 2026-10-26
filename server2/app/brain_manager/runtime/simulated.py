@@ -92,7 +92,13 @@ class SimulatedRuntimeAdapter:
     def __init__(self, *, max_context_tokens: int = 8192) -> None:
         self.max_context_tokens = max_context_tokens
 
-    def create(self, *, brain_id: uuid.UUID, runtime_id: str) -> BrainRuntimeHandle:
+    def create(
+        self,
+        *,
+        brain_id: uuid.UUID,
+        runtime_id: str,
+        resource_root: str | None = None,
+    ) -> BrainRuntimeHandle:
         return SimulatedRuntime(
             brain_id=brain_id,
             runtime_id=runtime_id,

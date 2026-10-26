@@ -57,6 +57,36 @@ def test_model_path_honors_explicit_model_path(clean_model_env, monkeypatch, tmp
     assert _model_path() == gguf
 
 
+def test_brain_manager_resolves_qwen_model_from_server2_root(
+    clean_model_env, monkeypatch, tmp_path
+):
+    from app.brain_manager.config import BrainManagerConfig
+    from app.brain_manager.runtime import factory
+
+    server2_root = tmp_path / "server2"
+    module_path = server2_root / "app" / "brain_manager" / "runtime" / "factory.py"
+    module_path.parent.mkdir(parents=True)
+    artifact = server2_root / DEFAULT_GGUF_FILENAME
+    artifact.write_bytes(b"GGUF")
+    monkeypatch.setattr(factory, "__file__", str(module_path))
+
+    assert factory.resolve_model_path(
+        BrainManagerConfig(model_name=DEFAULT_MODEL_NAME)
+    ) == artifact
+
+
+def test_global_model_path_resolves_qwen_from_server2_root(
+    clean_model_env, monkeypatch, tmp_path
+):
+    server2_root = tmp_path / "server2"
+    (server2_root / "app").mkdir(parents=True)
+    artifact = server2_root / DEFAULT_GGUF_FILENAME
+    artifact.write_bytes(b"GGUF")
+    monkeypatch.setattr(main_module, "__file__", str(server2_root / "app" / "main.py"))
+
+    assert _model_path() == artifact
+
+
 def test_is_gguf_path_distinguishes_file_and_directory(tmp_path):
     gguf = tmp_path / "model.gguf"
     gguf.write_bytes(b"GGUF")
@@ -75,14 +105,30 @@ def test_build_runtime_selects_gguf_or_transformers(tmp_path):
     assert isinstance(_build_runtime(model_dir), ModelRuntime)
 
 
-def test_health_reports_missing_model_as_unavailable(clean_model_env, monkeypatch, tmp_path):
+def test_health_does_not_load_a_global_model_before_brain_provisioning(
+    clean_model_env, monkeypatch, tmp_path
+):
     monkeypatch.setenv("AURA_SKIP_MODEL_LOAD", "0")
     monkeypatch.setenv("MODEL_NAME", "Qwen3.5-0.8B")
     monkeypatch.setenv("MODEL_PATH", str(tmp_path / "missing.gguf"))
 
     response = TestClient(main_module.app).get("/health")
-    assert response.status_code == 503
-    assert "Qwen3.5-0.8B" in response.json()["detail"]
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "provider": "local",
+        "model": "Qwen3.5-0.8B",
+        "model_loaded": False,
+        "active_brain_runtimes": 0,
+    }
+
+
+def test_startup_does_not_construct_the_pre_user_runtime(clean_model_env, monkeypatch):
+    def fail_if_called():
+        raise AssertionError("startup must not load a shared model runtime")
+
+    monkeypatch.setattr(main_module, "_get_runtime", fail_if_called)
+    assert main_module.startup_runtime() is None
 
 
 def test_health_skip_mode_reports_ok_without_loading(clean_model_env, monkeypatch):

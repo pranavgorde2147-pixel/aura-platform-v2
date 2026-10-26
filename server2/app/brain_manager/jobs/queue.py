@@ -11,6 +11,8 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from contextvars import ContextVar
+from functools import wraps
 from typing import Any
 
 from sqlalchemy import func, select, update
@@ -18,6 +20,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.brain_manager.db_models import BrainProcessingJob
+from app.brain_manager.vault.storage import get_brain_vault_storage
 from app.storage_db import ManagedBrain
 
 #: Payload keys a caller may never set: they belong to the registry.
@@ -30,6 +33,22 @@ JOB_RUNNING = "running"
 JOB_COMPLETED = "completed"
 JOB_FAILED = "failed"
 JOB_DEAD = "dead"
+
+
+def _private_job_operation(method):
+    """Run job payload and result operations inside the owning Brain's vault."""
+    @wraps(method)
+    async def wrapped(self, brain: ManagedBrain, *args, **kwargs):
+        if self._active_session.get() is not None:
+            return await method(self, brain, *args, **kwargs)
+        async with get_brain_vault_storage().session(brain) as private_session:
+            token = self._active_session.set(private_session)
+            try:
+                return await method(self, brain, *args, **kwargs)
+            finally:
+                self._active_session.reset(token)
+
+    return wrapped
 
 
 class JobQueueError(Exception):
@@ -77,9 +96,18 @@ class BrainJobQueue:
     """Queue, claim and complete Brain processing jobs."""
 
     def __init__(self, session: AsyncSession, *, max_jobs_per_brain: int = 64) -> None:
-        self.session = session
+        self._registry_session = session
+        self._active_session: ContextVar[AsyncSession | None] = ContextVar(
+            f"brain_job_session_{id(self)}", default=None
+        )
         self.max_jobs_per_brain = max_jobs_per_brain
 
+    @property
+    def session(self) -> AsyncSession:
+        session = self._active_session.get() or self._registry_session
+        return session
+
+    @_private_job_operation
     async def enqueue(
         self,
         brain: ManagedBrain,
@@ -134,6 +162,7 @@ class BrainJobQueue:
         await self.session.refresh(job)
         return job
 
+    @_private_job_operation
     async def find_by_idempotency_key(
         self, brain: ManagedBrain, idempotency_key: str
     ) -> BrainProcessingJob | None:
@@ -145,6 +174,7 @@ class BrainJobQueue:
         )
         return result.scalars().first()
 
+    @_private_job_operation
     async def claim_next(self, brain: ManagedBrain) -> BrainProcessingJob | None:
         """Claim the next runnable job of one Brain."""
         now = datetime.now(timezone.utc)
@@ -176,34 +206,66 @@ class BrainJobQueue:
         await self.session.refresh(job)
         return job
 
+    @_private_job_operation
     async def complete(
-        self, job: BrainProcessingJob, *, result_payload: dict[str, Any] | None = None
+        self,
+        brain: ManagedBrain,
+        job: BrainProcessingJob,
+        *,
+        result_payload: dict[str, Any] | None = None,
     ) -> BrainProcessingJob:
         """Mark one job as completed."""
-        job.status = JOB_COMPLETED
-        job.result = result_payload or {}
-        job.finished_at = datetime.now(timezone.utc)
-        job.error_code = None
+        result = await self.session.execute(
+            select(BrainProcessingJob).where(
+                BrainProcessingJob.id == job.id,
+                BrainProcessingJob.brain_id == brain.brain_id,
+                BrainProcessingJob.owner_id == brain.owner_id,
+            )
+        )
+        persisted = result.scalars().first()
+        if persisted is None:
+            raise JobQueueError("Job does not belong to this Brain")
+        persisted.status = JOB_COMPLETED
+        persisted.result = result_payload or {}
+        persisted.finished_at = datetime.now(timezone.utc)
+        persisted.error_code = None
         await self.session.commit()
-        await self.session.refresh(job)
-        return job
+        await self.session.refresh(persisted)
+        return persisted
 
+    @_private_job_operation
     async def fail(
-        self, job: BrainProcessingJob, *, error_code: str, retryable: bool = True
+        self,
+        brain: ManagedBrain,
+        job: BrainProcessingJob,
+        *,
+        error_code: str,
+        retryable: bool = True,
     ) -> BrainProcessingJob:
         """Mark one job as failed (or requeue it for a later attempt)."""
-        job.error_code = error_code
-        job.finished_at = datetime.now(timezone.utc)
-        if retryable and job.attempts < job.max_attempts:
-            job.status = JOB_QUEUED
-            job.finished_at = None
-            job.available_at = datetime.now(timezone.utc) + timedelta(seconds=min(60, 2**job.attempts))
+        result = await self.session.execute(
+            select(BrainProcessingJob).where(
+                BrainProcessingJob.id == job.id,
+                BrainProcessingJob.brain_id == brain.brain_id,
+                BrainProcessingJob.owner_id == brain.owner_id,
+            )
+        )
+        persisted = result.scalars().first()
+        if persisted is None:
+            raise JobQueueError("Job does not belong to this Brain")
+        persisted.error_code = error_code
+        persisted.finished_at = datetime.now(timezone.utc)
+        if retryable and persisted.attempts < persisted.max_attempts:
+            persisted.status = JOB_QUEUED
+            persisted.finished_at = None
+            persisted.available_at = datetime.now(timezone.utc) + timedelta(seconds=min(60, 2**persisted.attempts))
         else:
-            job.status = JOB_FAILED if not retryable else JOB_DEAD
+            persisted.status = JOB_FAILED if not retryable else JOB_DEAD
         await self.session.commit()
-        await self.session.refresh(job)
-        return job
+        await self.session.refresh(persisted)
+        return persisted
 
+    @_private_job_operation
     async def list_jobs(
         self,
         brain: ManagedBrain,
@@ -232,6 +294,7 @@ class BrainJobQueue:
         )
         return list(result.scalars().all()), total
 
+    @_private_job_operation
     async def job_counts(self, brain: ManagedBrain) -> dict[str, int]:
         """Return the number of jobs per status for one Brain."""
         result = await self.session.execute(

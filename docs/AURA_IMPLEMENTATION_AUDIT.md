@@ -1,7 +1,11 @@
-# AURA Platform — Implementation Audit
+# AURA Platform — Historical Implementation Audit
 
-Status: Phase A deliverable (audit). Evidence is drawn from the repository at the
-current working tree, not from intent. Each subsystem is classified as
+Status: Phase A snapshot. This audit contains time-sensitive implementation
+claims from an earlier repository state and is retained as historical context.
+Do not use its application counts or statuses as current; consult
+[`AURA_APP_INVENTORY.md`](./AURA_APP_INVENTORY.md) for the current product
+boundary and app evidence. The original classifications were drawn from the
+repository state at the time, not from intent. Each subsystem was classified as
 **implemented / under-tested / partial / mock / missing / blocked**.
 
 Scope: two servers only — Server 1 (AURA Core, `server1/`, port 8000, public) and
@@ -196,22 +200,24 @@ Classification: **implemented** (integration-tested against embedded PG).
 
 ---
 
-## 11. Apps, modules and permissions
+## 11. Apps, modules and permissions (historical snapshot)
 
-- Catalog of 16 apps/entries in `app/services/app_registry.py:CATALOG`;
+- Catalog of 16 apps/entries at the time of this audit in
+  `app/services/app_registry.py:CATALOG`;
   per-user connections via `InstalledModule` + `ModulePermission`.
 - `has_active_permission` gates brain query/ingest by app slug + scope + action.
 - Lifecycle: install / list / get / update (activate + replace permissions) /
   revoke.
 
-Catalog status mix (see `docs/AURA_APP_INVENTORY.md`): `live` (aura-core, brain,
-meeting, memory, files), `planned` (notes, study, tasks, notifications,
-workflow, search), `module` (timeline, knowledge-graph, chronos), `future`
-(health).
+The historical catalog status mix is stale. The current catalog contains 17
+entries and mixes products, shared capabilities, and a Chronos marker.
+[`AURA_APP_INVENTORY.md`](./AURA_APP_INVENTORY.md) is the canonical current
+product and capability inventory.
 
 Classification: registry/permissions **implemented**; concrete app integrations
-(Study Companion, Daily Diary, Meeting Assistant, Travel App, Notification Hub)
-**missing/planned** — the catalog describes them but no ingestion pipelines exist.
+(including Diary, Health, Study, Meeting, Travel, and Notifications adapters)
+must be checked against the current `server1/app/services/app_ingestion.py`;
+this historical statement does not describe present adapter coverage.
 
 ---
 
@@ -462,4 +468,3 @@ uncalibrated score as a calibrated one.
 
 Classification: **implemented**; remaining work is client-side (the apps and
 the review UI) and production verification of the deployment (Phase J).
-

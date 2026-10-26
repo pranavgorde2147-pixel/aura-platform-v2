@@ -24,11 +24,16 @@ services:
       STORAGE_DATA_DIR: /var/data
       STORAGE_LOCAL_ROOT: /var/data/objects
       STORAGE_DATABASE_URL: ${STORAGE_DATABASE_URL:-sqlite+aiosqlite:////var/data/storage.db}
+      BRAIN_RESOURCE_ROOT: ${BRAIN_RESOURCE_ROOT:-/var/data/brains}
+      BRAIN_VAULT_BACKUP_ROOT: ${BRAIN_VAULT_BACKUP_ROOT:-/var/data/brain_vault_backups}
+      BRAIN_RUNTIME_MODE: ${BRAIN_RUNTIME_MODE:-dedicated}
+      BRAIN_RUNTIME_ADAPTER: ${BRAIN_RUNTIME_ADAPTER:-auto}
+      BRAIN_MAX_CONCURRENT_RUNTIMES: ${BRAIN_MAX_CONCURRENT_RUNTIMES:-8}
       STORAGE_API_TOKEN: ${STORAGE_API_TOKEN:-${INTERNAL_API_TOKEN:-}}
       MAX_UPLOAD_SIZE_BYTES: ${MAX_UPLOAD_SIZE_BYTES:-52428800}
     volumes:
       # Host directory holding the Qwen3.5 GGUF checkpoint. Override with MODEL_HOST_PATH.
-      - ${MODEL_HOST_PATH:-./models}:/models:ro
+      - ${MODEL_HOST_PATH:-.}:/models:ro
       - server2_data:/var/data
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request, sys; r = urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=5); sys.exit(0 if r.status == 200 else 1)"]

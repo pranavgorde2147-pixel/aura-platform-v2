@@ -1,102 +1,126 @@
-# PHASE 1: REPOSITORY AUDIT
+# Personal Brain Harness Audit
 
-## Current Architecture (Observed)
+## Scope and baseline
 
-The repository currently has three services as documented:
+This audit reflects the repository currently in the workspace, not an
+assumption that it still matches older three-service documentation. The active
+deployable services are `server1/` and `server2/`; object storage, previously
+called Server 3, is now hosted by Server 2. The old audit describing a separate
+`server3/` deployment was stale.
 
-### SERVER 1 (server1/) - AURA CORE/API
-- Entry: app/main.py:create_app()
-- Port: 8000
-- Purpose: Auth, users, Personal Brain, files API, health
-- Key features:
-  - FastAPI with JWT auth (access/refresh tokens)
-  - User management, AI identity, Personal AI Brain models
-  - PersonalBrainService orchestrates queries via providers
-  - BrainMemory model for structured persistent memories (fact/interpretation/event)
-  - MemoryVault model for object references
-  - Files API proxies to Server 3 with owner isolation
-  - Brain client calls Server 2 for inference
-  - Health checks aggregate DB, Redis, Qdrant, AI server, Storage server
-  - Supports external AI fallback when Server 2 unavailable
+Baseline commands were run before the harness changes:
 
-### SERVER 2 (server2/) - INFERENCE
-- Entry: app/main.py
-- Port: 8001
-- Purpose: LLM inference (Qwen3.5-4B) with internal token auth
-- Endpoint: POST /v1/brain/infer
-- Strips sensitive context keys (vault, password, secret, token, jwt)
-- Supports external LLM fallback when in skip mode
-- Health/ready endpoints
+| Suite | Result |
+|---|---|
+| Server 1: `cd server1 && PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q tests` | 194 passed, 19 failed |
+| Server 2: `cd server2 && PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q tests` | 107 passed, 2 skipped |
 
-### SERVER 3 (server3/) - OBJECT STORAGE
-- Entry: app/main.py:create_app()
-- Port: 8002
-- Purpose: Object storage (local filesystem, S3 supported)
-- Internal token + X-Aura-Owner-Id for per-user isolation
-- Metadata stored in SQLite/Postgres (StoredObject)
-- Endpoints: /v1/objects (upload/list), /v1/objects/{id} (download/delete), /v1/objects/{id}/metadata
+The Server 1 failures cluster around endpoints returning `503 Personal Brain
+is not ready`: those integration fixtures disable remote provisioning but
+continue to exercise APIs that now require a ready Brain. These are baseline
+failures, not caused by the Server 2 harness changes. Server 2's baseline was
+green, with two skips. Docker, GPU inference, and the configured 4B checkpoint
+are unavailable in this workspace as noted in `AGENTS.md`.
 
-## Existing Working Functionality
+## Service and API map
 
-- Authentication system (JWT, login/refresh/logout)
-- User CRUD with ownership checks
-- AI Identity per user (1:1)
-- Personal AI Brain tied to AI Identity
-- BrainMemory persistence with kind/source (FACT/INTERPRETATION/EVENT, USER/BRAIN/APP)
-- Memory retrieval (search by keywords, recent)
-- Explicit opt-in for memory use/persistence (use_memory, persist_interaction)
-- Files API with owner isolation via Server 3
-- Real Server 2 integration with fallback
-- Cross-user isolation enforced at multiple layers
-- Database migrations with Alembic
+### Server 1 — identity, permissions, and public gateway
 
-## Dependencies Between Servers
+- FastAPI entrypoint: `server1/app/main.py`.
+- Authentication and account lifecycle: `server1/app/api/v1/auth.py`,
+  `server1/app/api/v1/users.py`, and `server1/app/dependencies/auth.py`.
+- Canonical user Brain and identity: `server1/app/models/personal_ai_brain.py`,
+  `server1/app/models/ai_identity.py`, and their repositories.
+- App catalog, consent, and per-app grants:
+  `server1/app/services/app_registry.py` and
+  `server1/app/api/v1/apps.py`.
+- Query and application ingestion:
+  `server1/app/api/v1/brain.py`,
+  `server1/app/services/app_ingestion.py`, and
+  `server1/app/services/personal_brain.py`.
+- User-facing vault, files, and timeline APIs:
+  `server1/app/api/v1/vault.py`, `files.py`, and `timeline.py`.
+- Authenticated Server 2 contracts:
+  `server1/app/infrastructure/brain_client.py` and
+  `server1/app/infrastructure/storage_client.py`.
 
-- Server 1 calls Server 2 via BrainClient (httpx) using INTERNAL_API_TOKEN, passes user_id, query, context
-- Server 1 calls Server 3 via StorageClient using STORAGE_API_TOKEN/effective token, passes X-Aura-Owner-Id header
-- Server 2 validates Bearer token, enforces model name, validates UUIDs
-- Server 3 validates Bearer token + owner_id, enforces per-owner filtering
+Server 1 authenticates end users, derives owner identity from the JWT, owns the
+app catalog and grants, and is the public gateway. The user token is not sent
+to Server 2. Server 1 forwards the internal service token and trusted owner
+and Brain identifiers. App-facing requests must not select another user's
+Brain.
 
-## Storage Implementation Details
+### Server 2 — Brain runtime, private vault, and object storage
 
-Server 3 implements full object storage with:
-- Local filesystem backend with path safety
-- Metadata table (stored_objects) with owner_id, checksum, etc.
-- Per-user isolation enforced in queries
-- Size limits, content-type allowlist
-- Cross-user isolation tested
+- Combined inference/storage application: `server2/app/main.py`.
+- Storage-only ASGI entrypoint for tests and storage-only operation:
+  `server2/app/storage_app.py`.
+- Brain registry, lifecycle, and provisioning:
+  `server2/app/brain_manager/registry/`,
+  `lifecycle/manager.py`, and `provisioning/orchestrator.py`.
+- Model artifact copy and runtime selection:
+  `runtime/artifacts.py`, `runtime/factory.py`, and the runtime adapters.
+- Per-Brain SQLite vault, vector index, consent snapshot, and migration:
+  `vault/storage.py`, `vault/service.py`, `vault/apps.py`, and
+  `vault/migration.py`.
+- Object storage API and adapters: `server2/app/api/objects.py`,
+  `server2/app/services/objects.py`, and `server2/app/storage/`.
 
-Server 1's MemoryVault is a different concept (metadata record pointing to object reference, currently separate from BrainMemory). BrainMemory is the new structured memory approach.
+Server 2 authenticates Server 1 with `INTERNAL_API_TOKEN`. The legacy object
+storage role runs in the same service and remains behind Server 1's public
+gateway. There is no active separate Server 3 deployment in this workspace.
 
-## Meeting/Summarization Workflows
+## Capability assessment
 
-Minimal explicit meeting/summarization API endpoints found. "meeting_ai" is listed as a future Qdrant collection name, but no specific meeting/summarization endpoints or services in the API surface beyond what's described. The core AURA functionality centers around brain/memory/files/auth.
+| Capability | Assessment | Evidence and remaining gap |
+|---|---|---|
+| Canonical user identity and Brain ownership | Implemented; tested | Server 1 owns the user/identity relationship. Server 2 enforces unique owner and identity registry rows and filters vault operations on both Brain and owner. |
+| Per-Brain manifest and provisioning | Implemented; tested | Provisioning is idempotent and records status/resources. Reconciliation is exposed through Server 1; private-vault migration is explicit and retryable. |
+| Separate physical local model artifact | Partially implemented; tested for file copies | Dedicated local provisioning stages a separate copy and does not replace incomplete copies. Copy verification currently needs stronger integrity/hash and hard-link checks. Simulator and external-provider modes do not satisfy physical private weights; external weights remain provider-managed. |
+| Isolated runtime and bounded concurrency | Implemented; tested at application level | Runtime IDs, contexts, and request slots are Brain-scoped. Runtime management is in-process; it is not OS/process/container isolation. |
+| Private vault and object root | Implemented; tested | Each Brain has a separate SQLite file and local object directory. Backups/restores are scoped. SQLite and backups are not application-encrypted; deployment must provide OS/storage encryption. |
+| App workspaces and consent enforcement | Implemented; tested | Vault namespaces preserve app provenance. Server 2 mirrors Server 1 consent and checks app grants at the storage boundary. |
+| Original application data and timeline preservation | Partially implemented | Server 1 ingestion stores canonical app records and raw payload metadata, with provenance/timeline support. A uniform lossless raw-event envelope and distinct source-created/event/received/modified timestamps are not yet enforced across all adapters and vault records. |
+| LLM retrieval and controlled tools | Implemented; focused tests added | Fixed search/list/read/create/update tools are bounded and audited. Normal mode enforces app grants and writes to the caller's namespace. Owner-approved `manage_vault` mode lets the internal Brain read and organize all namespaces represented in that owner's app connections; writes additionally require `confirm_tool_writes`. |
+| Cross-app read access | Implemented with two explicit modes | Normal queries use app grants. Whole-vault management is an explicit per-request owner authorization, remains scoped to the owner's Brain, and includes inactive app connections. Server 2 verifies the source app's read grant and the owner/Brain boundary. |
+| Update history and recoverability | Implemented for record updates; tested | Each successful update snapshots the prior version in the private vault; version history is owner/Brain-scoped and exposed through the Server 1 gateway. Tool-created/updated records carry AI-management metadata. The model tool surface has no delete operation. Backups and migration preserve vault resources. |
+| Application-facing Server 2 access | Implemented; tested | End-user APIs stay on Server 1; internal Server 2 routes require the internal token and owner/Brain assertions. |
 
-## Database Models
+## Verification after this change
 
-Server 1 has: User, AIIdentity, PersonalAIBrain, BrainMemory, MemoryVault, KnowledgeGraph, Timeline, Device, ModulePermission, Session, InstalledModule.
+| Suite | Result |
+|---|---|
+| Server 1 complete suite | 198 passed, 19 failed (same failures as baseline) |
+| Server 1 focused Brain authorization/context/version tests | 30 passed |
+| Server 2 complete suite | 111 passed, 2 skipped |
+| Server 2 Brain architecture/harness tests | 38 passed |
 
-BrainMemory (newer) stores actual memory content with kinds. MemoryVault stores object references.
+The 19 Server 1 failures are unchanged from baseline. Their common readiness
+failure is consistent with the integration fixture setting
+`BRAIN_REMOTE_PROVISIONING_ENABLED=false` and leaving newly created Brains
+pending while tests exercise APIs that require a ready Brain. Fix the fixtures
+to provision test Brains or assert the expected `503`; production readiness
+must not be weakened to make those tests green.
 
-## Tests
+The harness tests exercise authorized search, denial without explicit write
+confirmation, confirmed/idempotent writes, whole-vault cross-app organization,
+content-free audit events, AI metadata, and record-version preservation. Server
+1 tests verify client-supplied tool authorization context is replaced with
+gateway-derived values, manager namespaces are derived from the owner's app
+connections, and version history is denied when the record belongs to a
+different app namespace. The shared Android guide and reusable app-agent prompt
+document the app-side opt-in and data contract.
 
-Server 1 tests: auth/brain boundary, brain memory, fallback, config, files API, model architecture, cardinality. Integration tests exist for backend DB and storage end-to-end (real Server 3 process + embedded Postgres in some contexts?).
+## Operational and security limits
 
-Server 2 tests: health/inference schema, validation, isolation.
-Server 3 tests: objects lifecycle, ownership, persistence, limits.
-
-## Migration Risks
-
-- Server 3 currently handles file storage via HTTP API. If we eliminate Server 3 as a separate deployed app, we need to migrate its storage capabilities into Server 2 (per target). But also need to consider - Server 3 does local filesystem + metadata DB. Moving into Server 2 means Server 2 takes on storage responsibility.
-- MemoryVault vs BrainMemory - they serve different purposes; need to understand if both needed.
-- Files API in Server 1 currently proxies to Server 3 - this contract must be preserved if possible.
-- Existing working endpoints must not break.
-
-## Key Observations
-
-1. Current architecture is 3 servers. Target is 2 servers (Server 1 + Server 2). Server 3's capabilities need to be migrated into Server 2.
-2. Strong existing patterns for per-user isolation (owner_id, ai_identity_id filtering).
-3. BrainMemory already implements the structured memory model requested (fact/interpretation/event, controlled operations).
-4. Real inference integration exists (Server 2) - must preserve.
-5. Authentication is solid.
-6. Explicit opt-in for memory operations is already implemented (good design).
+- Private local model copies consume roughly one full artifact per Brain. The
+  0.8B GGUF is about 590 MB per copy; live runtime memory is additional and
+  capacity-limited.
+- External providers and simulator mode are not equivalent to per-user local
+  physical model copies.
+- Per-Brain folders and in-process runtime contexts provide application-level
+  isolation, not separate operating-system users, processes, or containers.
+- Vault SQLite files and backups are not encrypted by the application.
+- Do not deploy until the internal token is set identically in Server 1 and
+  Server 2, durable storage is configured, and the Server 1 baseline failures
+  are resolved or explicitly accepted.

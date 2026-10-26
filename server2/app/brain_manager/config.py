@@ -11,11 +11,10 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-#: One dedicated runtime instance per Brain. The adapter creates a runtime
-#: object whose inference context (KV cache) belongs to exactly one Brain.
+#: One dedicated local runtime/context and complete model copy per Brain.
 RUNTIME_MODE_DEDICATED = "dedicated"
-#: A dedicated runtime *handle* per Brain, but the underlying model weights and
-#: provider are shared. Reported honestly as ``context_isolated_shared_weights``.
+#: A dedicated runtime handle per Brain using an external provider.
+#: Reported as ``context_isolated_shared_weights``.
 RUNTIME_MODE_EXTERNAL = "external"
 #: A dedicated runtime handle backed by the deterministic simulator. Used by
 #: the test-suite and by ``AURA_SKIP_MODEL_LOAD`` deployments. Always reported
@@ -98,7 +97,11 @@ class BrainManagerConfig:
 
     @property
     def resolved_resource_root(self) -> Path:
-        return Path(self.resource_root)
+        configured = Path(self.resource_root).expanduser()
+        if configured.is_absolute():
+            return configured
+        server2_root = Path(__file__).resolve().parents[2]
+        return server2_root / configured
 
     @property
     def is_simulated(self) -> bool:

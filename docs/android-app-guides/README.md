@@ -1,33 +1,52 @@
-# AURA Android App Integration Guides
+# AURA Android Studio Guide Index
 
-This folder contains **one guide per app** for Android Studio agents. Each guide is self-contained and tells the agent exactly how to:
+The canonical product boundary is [AURA Product and Shared-Capability
+Inventory](../AURA_APP_INVENTORY.md). This folder contains one Android Studio
+handoff guide for each of the seven primary AURA apps and one separate
+Chronos guide. Shared capabilities are documented in the app guide that uses
+them; capabilities are not separate app guides.
 
-1. Configure the app to connect to AURA Server 1 (Render or local)
-2. Auto-connect the app to the user's account on first run / login
-3. Verify the connection against the live catalog + permissions
-4. Send data to the Personal Brain via ingestion
-5. Query the Personal Brain safely (only if authorized)
-6. Test and verify end-to-end
+## Shared Brain and Vault access rule
 
-**Base URLs (fill in with your Render values):**
+Every AURA app may use the shared Brain and other server capabilities that are
+relevant to that app and supported by its API contracts. Brain query/search
+may include read-only records from other active app connections with
+`brain:read` (and Files documents with `files:read`); show their source and do
+not treat them as app-owned records. Each app's Vault screen and its
+edit/delete actions stay within that app's own namespace. AURA Core is the
+exception: its explicit, user-controlled Whole-Vault Mode can manage all app
+namespaces in that user's Brain, with destructive actions still confirmed.
 
-| Service | URL | Notes |
-| --- | --- | --- |
-| Server 1 (AURA Core) | `https://aura-server1a-core.onrender.com` | API host. All `/api/v1/*` endpoints live here. |
-| Auth | `/api/v1/auth/login`, `/api/v1/auth/refresh`, `/api/v1/auth/me` | Bearer JWT access token required for protected endpoints |
-| Apps / Connections | `/api/v1/apps`, `/api/v1/apps/me`, `/api/v1/apps/me/{id}` | Catalog is public, connections require auth |
-| Brain Query | `/api/v1/brain/query` | Requires `Authorization` + active connection with `brain:read` if `source_app` is used |
-| Brain Ingest (direct) | `/api/v1/brain/ingest` | Requires auth; enforces `source_app` permission if provided |
-| App Ingest (routed) | `/api/v1/apps/{slug}/ingest` | **Preferred for app events**. Enforces connection + adapter scope/action server-side. |
+For AI-assisted Vault changes, the `harness:` prefix does not add permissions:
+the app's `memory:write` grant is required for writes and delete plans. The
+fixed Harness supports search, list/read, exact duplicate detection, create,
+update/rename, tags through record metadata, and confirmation-gated deletion.
+Copy can create a derived record; move and merge must be treated as staged,
+non-atomic create-then-delete workflows. Reminder scheduling, trash/restore,
+and automated cleanup are not implemented server capabilities.
 
-**Auth model:** After login, send `Authorization: Bearer <access_token>` on every protected request. Never put tokens in query params.
+## Seven primary AURA applications
 
-**Connection model:** After login, call `POST /api/v1/apps/me` with `{"module_slug": "<APP_SLUG>"}` using the logged-in user's token and omit `permissions` to receive the catalog defaults. A successful connection is `201`. This endpoint does not update an existing connection: it returns `409 CONFLICT` when that app is already connected. On `409`, fetch `GET /api/v1/apps/me`, locate the connection by `module_slug`, and inspect its `is_active` state and grants.
+| Product | Guide |
+| --- | --- |
+| AURA Core | [AURA Core Android Studio guide](./AURA-CORE-GUIDE.md) |
+| AURA Daily Diary | [Daily Diary Android Studio guide](./AURA-DIARY-GUIDE.md) |
+| AURA Health | [Health Android Studio guide](./AURA-HEALTH-GUIDE.md) |
+| AURA Study Companion | [Study Android Studio guide](./AURA-STUDY-GUIDE.md) |
+| AURA Meeting AI | [Meeting Android Studio guide](./AURA-MEETING-GUIDE.md) |
+| AURA Travel | [Travel Android Studio guide](./AURA-TRAVEL-GUIDE.md) |
+| AURA Notification Hub | [Notifications Android Studio guide](./AURA-NOTIFICATIONS-GUIDE.md) |
 
-`PATCH /api/v1/apps/me/{connection_id}` updates an existing connection. Its request body is `{"is_active": true, "permissions": [{"scope": "brain", "action": "read"}]}`; both fields are optional. When `permissions` is provided, it **replaces the entire permission list**; it does not add only the listed permission. Each requested grant must be declared for that app in the registry (as either a default or additional permission) or the API returns `403`. Before updating, merge the required permission into the permissions already returned by `/apps/me`, preserving existing grants that remain authorized by the registry. For an AURA Core connection that currently has `identity:read`, send `{"permissions": [{"scope": "identity", "action": "read"}, {"scope": "brain", "action": "read"}]}`. Then fetch `/apps/me` again and verify the final active connection has every required grant. Do not delete/reconnect a user's connection to change permissions.
+These guides document backend contracts and integration requirements; they do
+not prove the client application exists or is released. Check the catalog and
+the canonical inventory for current status. Each guide includes a tailored,
+ready-to-paste Android Studio prompt for a native implementation and its
+app-specific UI, API, privacy, and verification requirements.
 
-For AURA Core, the only default grant and required query grant is `brain:read`. `identity:read` is an explicitly allowed additional grant so existing connections can retain it, but it is not granted by default. Do not request `memory:write` or `timeline:write` for chat. Brain requests must use `source_app: "aura-core"`.
+## Independent product
 
-Handle response classes distinctly: `401` means authentication is missing or expired; `403` means the authenticated app connection lacks the required permission (not a network failure); `409` means the app is already connected and must be inspected/reconciled as above. Report actual transport failures and `5xx` responses separately from these API errors.
-
-**Important:** The registry's default grant affects only new connections. It does not retroactively update existing user connections. For a production `403`, verify the deployed Server 1 catalog and the user's `/api/v1/apps/me` connection rather than assuming the connection inherited the new default.
+- [Chronos Android Studio guide](./AURA-CHRONOS-GUIDE.md) describes the
+  repository's AURA-side catalog marker only. Chronos is an independent
+  enterprise product, not an AURA app. No deployed Chronos integration is
+  verified. Its prompt explicitly prevents inventing product/API behavior
+  where requirements are not established.

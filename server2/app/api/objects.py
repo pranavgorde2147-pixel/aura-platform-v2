@@ -13,6 +13,9 @@ import uuid
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, UploadFile, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
+from pypdf import PdfReader
+from pypdf.errors import PdfReadError
+from starlette.concurrency import run_in_threadpool
 
 from app.storage_db import get_db
 from app.schemas.storage import DeleteResponse, ObjectListResponse, ObjectMetadata
@@ -23,11 +26,36 @@ from app.services.objects import (
     delete_object,
     get_object,
     list_objects,
+    object_store_for_record,
     store_object,
 )
 from app.storage.base import get_cached_object_store
 
 router = APIRouter(prefix="/v1/objects", tags=["Objects"], dependencies=[Depends(require_internal_token)])
+
+
+def _extract_pdf_text(file_obj) -> tuple[str | None, str]:
+    """Extract bounded PDF text inside Server 2's storage service."""
+    file_obj.seek(0)
+    try:
+        reader = PdfReader(file_obj, strict=False)
+    except PdfReadError:
+        file_obj.seek(0)
+        return None, "failed"
+    if reader.is_encrypted:
+        file_obj.seek(0)
+        return None, "encrypted"
+    page_limit = 250
+    extracted = "\n".join(
+        text
+        for page in reader.pages[:page_limit]
+        if (text := page.extract_text())
+    )[:200000]
+    truncated = len(reader.pages) > page_limit or len(extracted) >= 200000
+    file_obj.seek(0)
+    if not extracted.strip():
+        return None, "empty"
+    return extracted, "truncated" if truncated else "complete"
 
 
 def resolve_owner_id(
@@ -84,7 +112,18 @@ async def upload_object(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
-    return ObjectMetadata.model_validate(record)
+    metadata = ObjectMetadata.model_validate(record)
+    if file.content_type == "application/pdf":
+        extracted_text, extraction_status = await run_in_threadpool(
+            _extract_pdf_text, file.file
+        )
+        return metadata.model_copy(
+            update={
+                "extracted_text": extracted_text,
+                "extraction_status": extraction_status,
+            }
+        )
+    return metadata
 
 
 @router.get("", response_model=ObjectListResponse)
@@ -128,7 +167,12 @@ async def download_object(
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Object not found")
 
-    store = get_cached_object_store()
+    try:
+        store = await object_store_for_record(
+            session, record, get_cached_object_store()
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Object not found") from exc
     if not store.exists(record.object_key):
         raise HTTPException(status_code=status.HTTP_410_GONE, detail="Object blob is missing")
 

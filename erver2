@@ -1,0 +1,56 @@
+[1mdiff --git a/server1/.env.example b/server1/.env.example[m
+[1mindex e6166aa..c3e2c67 100644[m
+[1m--- a/server1/.env.example[m
+[1m+++ b/server1/.env.example[m
+[36m@@ -41,6 +41,9 @@[m [mAI_SERVER_URL=[m
+ AI_SERVER_MODEL=Qwen3.5-0.8B[m
+ # Register each user's canonical Brain with Server 2 after account creation.[m
+ BRAIN_REMOTE_PROVISIONING_ENABLED=true[m
+[32m+[m[32m# Per-user model weight copies can take time; allow the first signup provisioning[m
+[32m+[m[32m# request up to this many seconds to finish.[m
+[32m+[m[32mBRAIN_PROVISIONING_TIMEOUT_SECONDS=900[m
+ # Comma-separated trusted user UUIDs for metadata-only Brain administration.[m
+ # Leave blank to disable operator Brain admin endpoints.[m
+ BRAIN_ADMIN_USER_IDS=[m
+[1mdiff --git a/server2/.env.example b/server2/.env.example[m
+[1mindex 96eaa13..3676012 100644[m
+[1m--- a/server2/.env.example[m
+[1m+++ b/server2/.env.example[m
+[36m@@ -53,10 +53,9 @@[m [mEXTERNAL_MODEL=qwen/qwen3.8-27b[m
+ # inference response - a simulated runtime is never presented as a[m
+ # production-isolated one.[m
+ #[m
+[31m-#   dedicated  - one real runtime instance per Brain. A GGUF checkpoint gives[m
+[31m-#                each Brain its own KV cache (dedicated_context); a[m
+[31m-#                transformers checkpoint gives each Brain its own weights[m
+[31m-#                (dedicated_weights).[m
+[32m+[m[32m#   dedicated  - provisioning copies the complete configured local model into[m
+[32m+[m[32m#                each Brain's personal_llm/model_weights/ folder. Each runtime[m
+[32m+[m[32m#                owns its own weights, context and KV cache.[m
+ #   external   - one provider handle per Brain. The provider's weights are[m
+ #                shared, the context is not[m
+ #                (context_isolated_shared_weights).[m
+[36m@@ -66,7 +65,7 @@[m [mEXTERNAL_MODEL=qwen/qwen3.8-27b[m
+ # Leave BRAIN_RUNTIME_MODE empty to let the service choose: "external" when[m
+ # AURA_SKIP_MODEL_LOAD=1 and an external provider is configured, "simulated"[m
+ # when no model can be loaded, "dedicated" otherwise.[m
+[31m-BRAIN_RUNTIME_MODE=[m
+[32m+[m[32mBRAIN_RUNTIME_MODE=dedicated[m
+ # Force a specific adapter: auto | llama_cpp | transformers | simulated.[m
+ # "auto" picks llama_cpp for a .gguf artifact and transformers otherwise.[m
+ BRAIN_RUNTIME_ADAPTER=auto[m
+[36m@@ -78,8 +77,13 @@[m [mBRAIN_MAX_CONCURRENT_RUNTIMES=8[m
+ BRAIN_MAX_CONCURRENT_REQUESTS_PER_BRAIN=1[m
+ # Context budget of one Brain's runtime.[m
+ BRAIN_MAX_CONTEXT_TOKENS=8192[m
+[31m-# Root directory of the per-Brain resource directories.[m
+[32m+[m[32m# Root directory of per-Brain resource directories. In Docker Compose this is[m
+[32m+[m[32m# overridden to /var/data/brains inside the persistent server2_data volume.[m
+ BRAIN_RESOURCE_ROOT=./data/brains[m
+[32m+[m[32m# The private SQLite vault, objects and indexes live inside each directory[m
+[32m+[m[32m# beneath BRAIN_RESOURCE_ROOT.[m
+[32m+[m[32m# Operator backups are stored outside each live Brain directory.[m
+[32m+[m[32mBRAIN_VAULT_BACKUP_ROOT=./brain_vault_backups[m
+ # Processing limits per Brain.[m
+ BRAIN_MAX_JOBS_PER_BRAIN=64[m
+ BRAIN_JOB_MAX_ATTEMPTS=3[m

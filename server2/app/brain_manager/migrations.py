@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 logger = logging.getLogger(__name__)
 
 #: Bump when a new migration is appended.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA_TABLE = "schema_migrations"
 
@@ -372,6 +372,38 @@ MIGRATIONS: tuple[Migration, ...] = (
             # --- stored_objects: Brain-scoped vault documents ------------
             AddColumn("stored_objects", ColumnSpec("brain_id", "string", nullable=True, length=36)),
             CreateIndex("ix_stored_objects_brain_id", "stored_objects", ("brain_id",)),
+        ),
+    ),
+    Migration(
+        version=2,
+        name="unified_brain_vault_namespaces",
+        operations=(
+            AddColumn(
+                "brain_vault_records",
+                ColumnSpec("namespace", "string", nullable=False, server_default="'shared'", length=160),
+            ),
+            AddColumn(
+                "brain_vault_records",
+                ColumnSpec("idempotency_key", "string", nullable=True, length=255),
+            ),
+            AddColumn(
+                "brain_vault_records",
+                ColumnSpec("version", "integer", nullable=False, server_default="1"),
+            ),
+            AddColumn(
+                "brain_vault_records",
+                ColumnSpec("deleted_at", "datetime", nullable=True),
+            ),
+            CreateIndex(
+                "ix_brain_vault_records_namespace",
+                "brain_vault_records",
+                ("brain_id", "namespace"),
+            ),
+            CreateUniqueConstraint(
+                "uq_brain_vault_records_idempotency",
+                "brain_vault_records",
+                ("brain_id", "idempotency_key"),
+            ),
         ),
     ),
 )

@@ -1,8 +1,11 @@
+import asyncio
 from uuid import uuid4
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
 
+from app import main
 from app.main import app
 from app.main import _build_messages
 
@@ -51,6 +54,34 @@ def _provision(client, user_id: str) -> dict:
     )
     assert response.status_code == 200, response.text
     return response.json()
+
+
+def test_startup_reconciles_runtime_registry(monkeypatch):
+    session = object()
+    manager = type(
+        "FakeRuntimeManager",
+        (),
+        {
+            "reconcile": AsyncMock(
+                return_value=[{"action": "runtime_missing"}]
+            )
+        },
+    )()
+
+    class SessionContext:
+        async def __aenter__(self):
+            return session
+
+        async def __aexit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(main, "init_storage_models", AsyncMock())
+    monkeypatch.setattr(main, "get_storage_session_factory", lambda: SessionContext)
+    monkeypatch.setattr(main, "get_runtime_manager", lambda: manager)
+
+    asyncio.run(main.startup_storage())
+
+    manager.reconcile.assert_awaited_once_with(session)
 
 
 def test_health(client):
@@ -205,3 +236,25 @@ def test_inference_prompt_includes_authorized_cross_app_records_and_memories():
     assert "Retrieved canonical user records" in system
     assert '"record_id": "record-1"' in system
     assert "My pet name is Sai." in system
+    assert "Do not claim you cannot access the user's diary, vault, or personal data" in system
+    assert "use only the approved context included in this request" in system
+
+
+def test_inference_prompt_includes_app_context_but_strips_nested_credentials():
+    system, _ = _build_messages(
+        "Summarize this diary entry",
+        {
+            "diary_entry": "I visited Raigad today and enjoyed the fort.",
+            "attachment": {
+                "extracted_text": "The report text is included for this request.",
+                "api_token": "must-not-be-forwarded",
+            },
+            "user_password": "must-not-be-forwarded",
+        },
+    )
+
+    assert "Summarize this diary entry" not in system
+    assert "App-provided context (user-authorized data for this request)" in system
+    assert "I visited Raigad today and enjoyed the fort." in system
+    assert "The report text is included for this request." in system
+    assert "must-not-be-forwarded" not in system

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -43,6 +44,8 @@ RUNTIME_ID_PREFIX = "rt_"
 #: How a runtime status maps from the adapter's isolation level.
 _ISOLATION_STATUS = {
     "dedicated_context": BrainRuntimeStatus.READY,
+    "dedicated_runtime_shared_weights": BrainRuntimeStatus.READY,
+    "dedicated_runtime_per_brain_weights": BrainRuntimeStatus.READY,
     "dedicated_weights": BrainRuntimeStatus.READY,
     "context_isolated_shared_weights": BrainRuntimeStatus.READY_EXTERNAL,
     "simulated": BrainRuntimeStatus.READY_SIMULATED,
@@ -87,9 +90,11 @@ class BrainRuntimeManager:
         self._adapter = adapter
         self._capacity = capacity
         self._runtimes: dict[uuid.UUID, BrainRuntimeHandle] = {}
-        self._locks: dict[uuid.UUID, asyncio.Lock] = {}
         self._slots: dict[uuid.UUID, asyncio.Semaphore] = {}
-        self._global_lock = asyncio.Lock()
+        self._allocation_lock = asyncio.Lock()
+        self._active_requests: dict[uuid.UUID, int] = {}
+        self._runtime_last_used: dict[uuid.UUID, float] = {}
+        self._known_brains: dict[uuid.UUID, ManagedBrain] = {}
 
     # -- accessors ---------------------------------------------------------
     @property
@@ -135,19 +140,73 @@ class BrainRuntimeManager:
             self._slots[brain_id] = slot
         return slot
 
-    def _lock_for(self, brain_id: uuid.UUID) -> asyncio.Lock:
-        lock = self._locks.get(brain_id)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._locks[brain_id] = lock
-        return lock
+    async def request_started(self, brain_id: uuid.UUID) -> None:
+        """Pin a Brain runtime while one of its requests is being served."""
+        async with self._allocation_lock:
+            self._active_requests[brain_id] = self._active_requests.get(brain_id, 0) + 1
+            self._runtime_last_used[brain_id] = time.monotonic()
+
+    async def request_finished(self, brain_id: uuid.UUID) -> None:
+        """Unpin a Brain runtime after one of its requests has completed."""
+        async with self._allocation_lock:
+            active = self._active_requests.get(brain_id, 0)
+            if active <= 1:
+                self._active_requests.pop(brain_id, None)
+            else:
+                self._active_requests[brain_id] = active - 1
+            self._runtime_last_used[brain_id] = time.monotonic()
+
+    async def _reserve_runtime_slot(
+        self, session: AsyncSession, brain: ManagedBrain
+    ) -> tuple[ResourceAvailability, str]:
+        """Reserve capacity, evicting the least-recently-used idle local runtime."""
+        availability, reason = await self.capacity.reserve(session, brain.brain_id)
+        if availability is ResourceAvailability.AVAILABLE:
+            return availability, reason
+
+        candidates = sorted(
+            (
+                runtime_brain_id
+                for runtime_brain_id in self._runtimes
+                if runtime_brain_id != brain.brain_id
+                and self._active_requests.get(runtime_brain_id, 0) == 0
+                and runtime_brain_id in self._known_brains
+            ),
+            key=lambda runtime_brain_id: self._runtime_last_used.get(
+                runtime_brain_id, 0.0
+            ),
+        )
+        for candidate_id in candidates:
+            candidate_brain = await BrainRegistryService.get(session, candidate_id)
+            if candidate_brain is None:
+                await self._release_handle(candidate_id)
+                await self.capacity.release(candidate_id)
+                continue
+            self._known_brains[candidate_id] = candidate_brain
+            await self._release_handle(candidate_id)
+            await self.capacity.release(candidate_id)
+            await BrainRegistryService.set_runtime_state(
+                session,
+                candidate_brain,
+                llm_runtime_status=BrainRuntimeStatus.STOPPED,
+                error=None,
+            )
+            availability, reason = await self.capacity.reserve(
+                session, brain.brain_id
+            )
+            if availability is ResourceAvailability.AVAILABLE:
+                logger.info("Evicted idle Brain runtime %s to serve another Brain", candidate_id)
+                return availability, reason
+
+        return availability, reason
 
     # -- lifecycle ---------------------------------------------------------
     async def provision_runtime(
         self, session: AsyncSession, brain: ManagedBrain
     ) -> RuntimeProvisionResult:
         """Create (or return) the dedicated runtime of one Brain."""
-        async with self._lock_for(brain.brain_id):
+        self._known_brains[brain.brain_id] = brain
+        async with self._allocation_lock:
             existing = self._runtimes.get(brain.brain_id)
             if existing is not None:
                 health = existing.health()
@@ -167,6 +226,7 @@ class BrainRuntimeManager:
                         runtime_isolation=existing.isolation,
                         error=None,
                     )
+                    self._runtime_last_used[brain.brain_id] = time.monotonic()
                     return RuntimeProvisionResult(
                         brain_id=brain.brain_id,
                         runtime_id=existing.runtime_id,
@@ -177,7 +237,7 @@ class BrainRuntimeManager:
                 # A broken runtime is replaced rather than reused.
                 await self._release_handle(brain.brain_id)
 
-            availability, reason = await self.capacity.reserve(session, brain.brain_id)
+            availability, reason = await self._reserve_runtime_slot(session, brain)
             if availability is not ResourceAvailability.AVAILABLE:
                 status = (
                     BrainRuntimeStatus.RESOURCE_LIMITED
@@ -203,9 +263,17 @@ class BrainRuntimeManager:
 
             runtime_id = new_runtime_id()
             try:
-                runtime = self.adapter.create(
-                    brain_id=brain.brain_id, runtime_id=runtime_id
-                )
+                resource_root = getattr(brain, "resource_root", None)
+                if resource_root and resource_root != f"brain_{brain.brain_id}":
+                    runtime = self.adapter.create(
+                        brain_id=brain.brain_id,
+                        runtime_id=runtime_id,
+                        resource_root=resource_root,
+                    )
+                else:
+                    runtime = self.adapter.create(
+                        brain_id=brain.brain_id, runtime_id=runtime_id
+                    )
             except RuntimeProvisioningError as exc:
                 await self.capacity.release(brain.brain_id)
                 brain.llm_runtime_status = BrainRuntimeStatus.FAILED.value
@@ -244,6 +312,7 @@ class BrainRuntimeManager:
                 )
 
             self._runtimes[brain.brain_id] = runtime
+            self._runtime_last_used[brain.brain_id] = time.monotonic()
             status = _ISOLATION_STATUS.get(runtime.isolation, BrainRuntimeStatus.READY)
             await BrainRegistryService.set_runtime_state(
                 session,
@@ -265,7 +334,7 @@ class BrainRuntimeManager:
 
     async def stop_runtime(self, session: AsyncSession, brain: ManagedBrain) -> bool:
         """Stop the runtime of one Brain and release its resources."""
-        async with self._lock_for(brain.brain_id):
+        async with self._allocation_lock:
             released = await self._release_handle(brain.brain_id)
             await self.capacity.release(brain.brain_id)
             await BrainRegistryService.set_runtime_state(
@@ -294,7 +363,7 @@ class BrainRuntimeManager:
 
     async def shutdown(self) -> None:
         """Release every runtime held by this process."""
-        async with self._global_lock:
+        async with self._allocation_lock:
             for brain_id in list(self._runtimes):
                 await self._release_handle(brain_id)
                 await self.capacity.release(brain_id)

@@ -1,6 +1,9 @@
 # AURA Brain — Universal Context and Routing Layer
 
-Status: **implemented** (Server 1 pipeline + Server 2 understanding service).
+Status: **partially implemented**. Server 2 analyzes inputs and stores records in
+the authenticated user's Brain vault. Cross-app delivery, review actions,
+processing-run retry/cancel, and automatic migration of legacy Server 1 content
+are not implemented.
 
 This document is the contract between the AURA Brain and every AURA
 application. It describes what an application may send, what the Brain does
@@ -11,31 +14,28 @@ sure, and how the platform keeps application data separate from Brain memory.
 
 ## 1. The model in one paragraph
 
-An application never decides where content belongs. It submits the content and
-its own identity to the Brain. The Brain **understands** the content (split it
-into independently meaningful items, label each with a semantic category and a
-record type, and score how confident it is), **resolves** the possible
-destinations from the application registry, **authorizes** each destination
-against the user's real connections and permissions, **delivers** what the
-policy allows to be delivered automatically, **parks** the rest for explicit
-user review, and **remembers** only a bounded summary — and only when the user
-asked for it.
+An application submits content with its source identity. Server 1 validates the
+caller's connection and permissions, Server 2 analyzes the content, and Server 1
+stores the resulting segments in that user's Server 2 vault under
+`apps/<source_app>`. Requests for other destinations are reported as blocked;
+cross-app delivery is not implemented.
 
-Understanding lives in Server 2 (`POST /v1/brain/analyze`). Routing, policy,
-authorization, delivery and memory live in Server 1
-(`POST /api/v1/brain/process`).
+Understanding and personal vault storage live in Server 2. Server 1 handles
+account authentication, app permissions, and the authenticated processing
+gateway (`POST /api/v1/brain/process`).
 
 ```
    app ──POST /api/v1/brain/process──▶ Server 1
                                          │
              ┌───────────────────────────┼──────────────────────────┐
              │ 1. validate source app    │ 2. analyze (Server 2)     │
-             │ 3. resolve destinations    │ 4. authorize             │
-             │ 5. deliver / park          │ 6. remember (opt-in)     │
+             │ 3. validate owner Brain    │ 4. store source segments │
+             │ 5. report blocked targets  │                          │
              └───────────────────────────┴──────────────────────────┘
                      │                     │
                      ▼                     ▼
-             app_records (full)      brain_memories (bounded summary)
+                   Server 2 Brain vault
+                    apps/<source_app>
 ```
 
 ---
@@ -66,8 +66,8 @@ Submit one input for understanding, routing and delivery.
 | `idempotency_key` | string | — | Body-level alternative to the `Idempotency-Key` header. |
 
 Responses: `201` with a `ProcessingResponse`, `403` when the source app is not
-authorized, `400` for an invalid request, `404` for an unknown run, `409` when
-the run was cancelled or cannot be retried in its current state.
+authorized, `422` for invalid destinations, and `503` when Server 2 is
+unavailable or returns unusable results.
 
 ### 2.2 `GET /api/v1/brain/process/{processing_id}`
 
@@ -76,22 +76,17 @@ another user is simply not found.
 
 ### 2.3 `POST /api/v1/brain/process/{processing_id}/confirm`
 
-Delivers the items the user approved. Body: `{"items": [{"index": 0,
-"destination_app": "study", "record_type": "lecture_note"}]}`. An empty list
-confirms every item that is waiting for review or authorization. The
-destination and record type may be overridden per item; the override is
-authorized exactly like an automatically chosen destination.
+Currently returns `410 Gone`. Cross-app delivery and review actions are not
+implemented.
 
 ### 2.4 `POST /api/v1/brain/process/{processing_id}/retry`
 
-Retries the operations of a run that did not succeed. Operations that already
-succeeded are never repeated, and a delivery is not attempted more times than
-the configured retry budget.
+Currently returns `410 Gone`. Per-run delivery retries are not implemented.
 
 ### 2.5 `POST /api/v1/brain/process/{processing_id}/cancel`
 
-Cancels a run that has not been delivered yet. Already-delivered operations
-keep their records; a delivered run cannot be cancelled.
+Currently returns `410 Gone`. Delete stored records through the confirmed
+Brain-vault API instead.
 
 ### 2.6 `POST /v1/brain/analyze` (Server 2, internal)
 
@@ -130,10 +125,8 @@ tried but its answer could not be used, the response is marked
 `degraded: true` with a `degraded_reason` (`model_load_skipped`,
 `llm_output_unusable`) and the labels come from the structural analyser.
 
-The category and record-type vocabulary is shared between the two services:
-Server 1 validates what Server 2 produces against the same taxonomy, so a
-record type is never silently rewritten on the way (a server1 test asserts the
-two lists stay identical).
+The analysis response supplies categories and record types, which are retained
+as metadata on the stored vault segments.
 
 ---
 
@@ -148,37 +141,29 @@ declares:
 | `categories` | Semantic categories the application accepts. |
 | `record_types` | Record types the application can store. |
 | `routable` | Whether the Brain may route records into the application at all. |
-| `storage_adapter` | `relational` (the `app_records` table) or `object` (the object storage service). |
+| `storage_adapter` | Catalog metadata describing the app integration; new processing records are stored in the Server 2 Brain vault. |
 | `ingest_scope` / `ingest_action` | Permission an app needs to *submit* content. |
 | `write_scope` / `write_action` | Permission an app needs to *receive* records. |
 
-The resolution steps for every extracted item:
+The planned cross-app routing design remains unimplemented. Current processing
+behavior validates the source app and write permission, analyzes the input in
+Server 2, and stores the resulting segments under `apps/<source_app>` in that
+owner's vault. Non-source destinations are reported as blocked; no cross-app
+write takes place.
 
-1. Find the registered applications whose `categories` contain the item's
-   category. If the client asked for specific destinations, restrict the set to
-   them first.
-2. Pick the record type: the item's own record type when the application
-   declares it, otherwise the closest declared type for that category (the
-   substitution stays visible in the response as `exact_match: false`).
-3. Authorize the destination:
-   - the application must be registered and `routable`;
-   - it must have a storage adapter and support the record type;
-   - the user must have an **active connection** to it;
-   - the connection must grant the declared `write_scope:write_action`.
-
-A destination that fails any check becomes an operation with status
-`awaiting_authorization` and a machine-readable `reason`
-(`connection_missing`, `connection_inactive`, `permission_missing`,
-`unsupported_record_type`, `not_routable`, `no_storage_integration`). Nothing
-is written and no permission is ever granted implicitly.
-
-The source application is authorized the same way, using its declared
-`ingest_scope:ingest_action`. A client that claims a different `source_app`
-than the one it authenticated as cannot bypass this.
+`GET /api/v1/brain/process/{processing_id}?client_app=<slug>` reconstructs
+status from the caller's authorized Server 2 namespace. Confirm, retry, and
+cancel currently return `410 Gone`.
 
 ---
 
-## 4. When the Brain is not sure
+## 4. Classification and cross-app review
+
+**Current behavior:** Server 2 returns classification and confidence metadata,
+but the processing endpoint does not apply the older risk thresholds below to
+route records. It stores each segment under the source app's namespace.
+Non-source destinations are reported as blocked; confirm/review operations
+currently return `410 Gone`.
 
 Confidence thresholds are policy, not model output. They live in
 `server1/app/core/config.py` and are applied per risk tier:
@@ -204,7 +189,36 @@ item then waits for confirmation.
 
 ---
 
-## 5. Memory versus application storage
+## 5. Unified Brain vault
+
+**Current behavior:** New app records, processed segments, document text,
+explicit memories, and conversation turns are stored in the owner's Server 2
+Brain vault in logical namespaces such as `apps/study`, `documents`, `shared`,
+and `conversations`. The prior Server 1 `app_records` and `brain_memories`
+design described below is legacy; new data must use `/api/v1/brain/vault`.
+Server 1 content has not been migrated or deleted. Migration needs a separate
+backup, verification, and approval.
+
+Cross-app *reads* are supported separately from cross-app *delivery*: Brain
+queries and vault search include another active app's namespace only when the
+owner has granted that app `brain:read`; uploaded document content additionally
+requires the Files app's `files:read`. A processing request still writes to its
+source app namespace and does not copy or route data into another app's
+namespace.
+
+The Server 2 internal token and owner header are server-side credentials and
+must never be sent by Android clients. Use Server 1's authenticated gateway
+for vault reads, search, updates, and confirmed soft-delete.
+
+Queries that include a catalog `source_app` store their query/answer turn under
+`apps/<source_app>` for app-wise organization. Queries without a `source_app`
+use `conversations`. Query persistence is automatic: the user query is saved
+before inference, and the answer is added after successful inference. Legacy
+clients may still send `persist_interaction:false`, but the field is ignored.
+If inference fails, the query remains in the private vault with a pending
+status and can be retried using the same `request_id`.
+
+<!-- Legacy architecture notes below are retained for historical context. -->
 
 These are deliberately different things.
 
@@ -461,7 +475,9 @@ record contents.
    default). Set Server 2 `STORAGE_DATABASE_URL` to persistent storage.
 2. Apply Server 1 migrations with `alembic upgrade head`, then deploy Server 2
    with the Brain registry code. Its storage startup creates the
-   `managed_brains` table.
+   `managed_brains` table and reconciles runtime entries left behind by a
+   previous Server 2 process. Run one Server 2 process per shared registry;
+   runtime handles are process-local.
 3. Deploy Server 1 with `BRAIN_REMOTE_PROVISIONING_ENABLED=true` (the default).
    New registrations provision after the account transaction commits. Existing
    users are not remotely registered just because the migration ran.
@@ -490,7 +506,7 @@ mode, and the service always reports the real isolation level in
 
 | Mode | Isolation reported | What is actually dedicated |
 |------|--------------------|------------------------------|
-| `dedicated` + llama.cpp | `dedicated_context` | One `llama_cpp.Llama` instance per Brain: its own context, KV cache and sampling state. The GGUF weight file is memory-mapped and shared read-only. |
+| `dedicated` + llama.cpp | `dedicated_weights` | One `llama_cpp.Llama` instance per Brain loads an independent model-weight copy, context, KV cache and sampling state. |
 | `dedicated` + transformers | `dedicated_weights` | One `AutoModelForCausalLM` instance per Brain: its own weights, KV cache and tokenizer state. |
 | `external` | `context_isolated_shared_weights` | One provider handle and one context per Brain; the provider's weights are shared. |
 | `simulated` | `simulated` | A deterministic simulator with a real per-Brain runtime object, context and cache. Never presented as model output. |

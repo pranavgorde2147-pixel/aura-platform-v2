@@ -1,125 +1,155 @@
-# AURA Application Integrations (Phase I)
+# AURA Server-Side App Integration Status
 
-Status of the planned AURA applications and the concrete server-side ingestion
-integration implemented for each. **No frontend client code exists in this
-repository** — there is no Flutter/Dart, Android, or web project anywhere in the
-tree. Everything below is the Server 1 backend integration; the mobile/web
-clients are still to be built.
+This is the backend implementation companion to the canonical
+[AURA Product and Shared-Capability Inventory](./AURA_APP_INVENTORY.md).
+It records routes and adapters verified in this repository; it is not the
+product taxonomy. The registry includes primary app entries, shared
+capabilities, and a legacy Chronos integration marker.
 
-Shared prerequisites already implemented and reused by every app:
+## Architecture boundary
 
-- **Shared AURA identity and authentication** — accounts, login, access/refresh
-  tokens, sessions and app authorization all live in Server 1
-  (`/api/v1/auth`, `/api/v1/users`, `/api/v1/apps`). Apps authenticate as the
-  user; the backend resolves the owner from the bearer token, never from the
-  payload.
-- **Per-user app connections** — `InstalledModule` + `ModulePermission`
-  (`/api/v1/apps/me`). A user must connect an app before it can send anything.
-- **Ingestion endpoint** — `POST /api/v1/apps/{slug}/ingest`. The authenticated
-  user is resolved server-side; the connection's active permission for the app's
-  declared scope/action is enforced before any write.
-- **Brain write path** — each event writes a brain memory (unless the event is
-  activity-only), a `memory_vault` pointer when an object is referenced, a
-  `knowledge_graph` node increment, and a dated `timeline` event carrying
-  `source_app` provenance. Eligible text is embedded and indexed for retrieval
-  (graceful keyword fallback when Qdrant is unavailable).
-- **Idempotency** — supplying `external_id` (or `event_id`/`id`) makes the write
-  idempotent: a replay with the same external id is detected via the timeline and
-  does not create a second memory.
-- **Partial-failure safety** — the memory is committed first; if a vault /
-  knowledge / timeline side effect fails, the memory is preserved and the
-  response reports `partial: true` instead of losing data.
+- **Server 1** (`server1/`) provides the public auth, app-connection,
+  permission, Brain-query, processing, Vault, and file gateway APIs.
+- **Server 2** (`server2/`) hosts the authenticated per-user Brain runtime,
+  harness/tool execution, per-Brain Vault, and object storage APIs.
+- Clients use Server 1 only. Server 1 derives the owner from the user's auth
+  token and forwards authorized operations to the owner's Brain.
+- **No Android, Flutter/Dart, Java/Kotlin, Gradle, or web client project was
+  found in this repository.** A catalog entry or Markdown guide is not proof
+  of a released application.
 
-## Per-application status
+The seven primary AURA products and capability boundaries are defined in the
+canonical inventory. Do not treat internal catalog capabilities as additional
+primary applications, and do not treat Chronos as an AURA product.
 
-### 1. AURA Chat — central personal AI assistant
+## Common API contracts
 
-- Frontend: **missing**.
-- Backend: **partial / live** — the primary surface is the Personal AI Brain
-  (`POST /api/v1/brain/query`, `POST /api/v1/brain/ingest`) under the `brain`
-  catalog entry. Persisted chat turns are supported through the `brain` adapter
-  (`chat.message`, interpretation). Conversations are never saved automatically.
-- Remaining: a chat client and an explicit "save this turn" UX.
+### App catalog and user connections
 
-### 2. Study Companion — Flutter, Theme B (calm, academic)
+- `GET /api/v1/apps` and `GET /api/v1/apps/{slug}` are public catalog reads.
+- `GET /api/v1/apps/me` lists the authenticated user's connections.
+- `POST /api/v1/apps/me` connects with `{"module_slug":"<catalog-slug>"}`;
+  catalog defaults apply when `permissions` is omitted.
+- `PATCH /api/v1/apps/me/{connection_id}` updates status or permissions.
+  A provided permissions array **replaces the complete grant list**.
+- `DELETE /api/v1/apps/me/{connection_id}` revokes a connection.
+- `POST /api/v1/apps/{slug}/ingest` requires an active connection and the
+  adapter's declared permission. The owner is taken from authentication, not
+  the request body.
 
-- Frontend: **missing** (spec says Flutter, Theme B; no Flutter project exists).
-- Backend: **implemented** — catalog `study` (planned) + `normalize_study` adapter
-  (`study.lecture_recorded`). Accepts notes/transcript/title/subject and an
-  optional attached document; stores a fact memory, timeline event, knowledge
-  node and vault pointer.
-- Remaining: the Flutter client and Theme B design system.
+### Brain query, processing, Vault, and files
 
-### 3. Daily Diary
+- `POST /api/v1/brain/query` handles natural-language queries and persists
+  query/answer turns in the caller's namespace. `source_app` requires its
+  active `brain:read` grant. With `use_memory:true`, retrieval includes
+  shared data and all active app namespaces whose connections grant
+  `brain:read`; document content additionally requires Files `files:read`.
+  For a `harness:` request, these other namespaces provide read-only context,
+  while the harness tools remain limited to the caller app's namespace.
+  The prefix enables fixed search/list/get/find-duplicates/create/update/
+  delete-plan tools; duplicate matching is exact after case and whitespace
+  normalization and scans at most 1,000 authorized records. It does not grant
+  app permissions or Whole-Vault Mode. Writes and app-local delete plans
+  require the caller's `memory:write` grant. Delete and exact text-replacement
+  plans require a separate approval request. A replacement request naming one
+  app is restricted to that namespace; Whole-Vault replacement requires Core's
+  explicit Whole-Vault Mode. Literal text replacement, app-namespace deletion
+  plans, and plan approvals are attempted through a deterministic Server 2
+  Harness path before model inference; other requests use the normal Brain path.
+- `POST /api/v1/brain/process` analyzes input and stores derived segments in
+  the source app namespace. Requested non-source destinations are reported
+  blocked; cross-app delivery/review actions are not implemented.
+- `/api/v1/brain/vault/records*` and `/api/v1/brain/vault/search` expose
+  authenticated owner-scoped Vault operations with app permission checks.
+- Each app's Vault UI should list and manage only its own namespace. Other
+  apps' records surfaced through Brain query/search are read-only context,
+  with source attribution; do not present them as records owned by the caller.
+- AURA Core's separately enabled `manage_vault:true` mode is the exception:
+  its Brain management tools can access every namespace in that user's Brain.
+  The app must keep this off by default and require explicit user opt-in and
+  confirmation for destructive operations.
+- `/api/v1/files*` proxies file operations to Server 2 object storage.
+- Server 2 internal endpoints and credentials are not client APIs.
 
-- Frontend: **missing**.
-- Backend: **implemented** — new catalog `diary` (planned) + `normalize_diary`
-  adapter (`diary.entry`). Entries are stored as interpretation memories (the
-  user's own reflection) with timeline provenance; optional mood/date.
-- Remaining: the diary client.
+For full product/capability ownership, route status, grants, and integration
+gaps, see the canonical inventory. For the processing request/response
+contract, see [AURA Brain Processing](./AURA_BRAIN_PROCESSING.md).
 
-### 4. Meeting Assistant
+## Concrete app ingestion adapters
 
-- Frontend: **missing** (catalog references `meetingapp (Android)`; no Android
-  project exists in this repo).
-- Backend: **implemented** — catalog `meeting` (live) + `normalize_meeting`
-  adapter (`meeting.recorded`). Accepts transcript/summary, decisions, action
-  items, participants and an optional transcript file; stores a fact memory,
-  timeline event, knowledge node and vault pointer.
-- Remaining: the Android client; routing decisions/action items into dedicated
-  Task/Notification stores (no such models exist yet — currently preserved in
-  the timeline event metadata).
+The current adapter registry is
+`server1/app/services/app_ingestion.py`; Server 1's route is
+`server1/app/api/v1/apps.py`.
 
-### 5. Travel App
+| Catalog slug | Adapter | Required input | Normalized event / record | Adapter permission |
+|---|---|---|---|---|
+| `brain` | `normalize_chat` | `message`, `content`, `text`, or `role_content` | `chat.message` / `chat_message` | `memory:write` |
+| `study` | `normalize_study` | `notes`, `transcript`, `content`, `text`, or `summary` | `study.lecture_recorded` / `study_record` | `memory:write` |
+| `diary` | `normalize_diary` | `entry`, `text`, `content`, or `body` | `diary.entry` / `diary_entry` | `memory:write` |
+| `meeting` | `normalize_meeting` | `transcript`, `summary`, `notes`, `content`, or `text` | `meeting.recorded` / `meeting` | `memory:write` |
+| `travel` | `normalize_travel` | `destination`, `destination_name`, `place`, or `title` | `travel.trip` / `trip` | `memory:write` |
+| `health` | `normalize_health` | wellness text/value or extracted report text | `health.wellness_event` or `health.medical_report` | `memory:write` |
+| `notifications` | `normalize_notification` | `message`, `body`, `text`, `content`, or `title` | `notification.received` / `notification` | `notifications:write` |
 
-- Frontend: **missing**.
-- Backend: **implemented** — new catalog `travel` (planned) + `normalize_travel`
-  adapter (`travel.trip`). Accepts destination, dates, notes and an optional
-  attachment; stores a fact memory, timeline event, knowledge node and vault
-  pointer.
-- Remaining: the travel client.
+Each app's single Android Studio guide documents optional payload keys and
+exact request examples. Adapters may normalize and retain selected metadata.
+The app route
+removes the adapter's `raw` metadata before persisting its Vault record; do
+not claim that the full original JSON payload is retained losslessly.
 
-### 6. Notification Hub
+For each accepted adapter input, Server 1 writes one record in
+`apps/{source_app}` using an idempotency key derived from the adapter's
+dedupe identifier or normalized request. The response includes
+`accepted`, `source_app`, `event_type`, `duplicate`, `partial`, `memory_id`,
+`vault_entry_id`, and `record_id`. In this route, IDs named `memory_id` or
+`vault_entry_id` may refer to the same Vault record; they do not establish a
+separate Postgres memory write. Notifications intentionally return
+`memory_id:null`.
 
-- Frontend: **missing** (internal service).
-- Backend: **implemented** — catalog `notifications` (planned, now with
-  `notifications:write`) + `normalize_notification` adapter
-  (`notification.received`). Notification events are activity-only: they write a
-  timeline event and knowledge node but deliberately create **no** brain memory.
-- Remaining: an actual delivery/push channel and a client subscription surface.
+### Catalog entries without an app-specific ingestion adapter
 
-### 7. Shared AURA identity and authentication
+`aura-core`, `chronos`, `files`, `knowledge-graph`, `memory`, `notes`,
+`search`, `tasks`, `timeline`, and `workflow` have no adapter entry in
+`app_ingestion.py`. The universal Brain process API and generic Vault gateway
+are separate contracts; their existence does not create an app-specific
+ingestion adapter or a client.
 
-- Frontend: **missing** (no shared client SDK).
-- Backend: **implemented** — registration, login, token refresh with rotation +
-  reuse detection, logout/revocation, `/auth/me`, and app authorization. This is
-  the same identity every app above authenticates against.
-- Remaining: a shared client SDK / login UI for the Flutter/web clients.
+## Universal Brain processing pipeline
 
-## Extension point
+`POST /api/v1/brain/process` is implemented in
+`server1/app/api/v1/processing.py`. It authenticates the user, validates the
+source catalog entry and permission, asks Server 2 to analyze content, and
+stores returned segments under `apps/{source_app}` in the authenticated
+owner's Vault. The response includes item classifications, destinations,
+authorization and delivery outcomes.
 
-Add an app by defining an `AppAdapter` in
-`server1/app/services/app_ingestion.py` (`slug`, `scope`, `action`, `normalize`)
-and ensuring a catalog entry grants that scope/action by default. Add a
-normalizer for the app's documented `sends_to_aura` payload; do not invent fields
-beyond the spec.
+The current code marks requested destinations other than the source as
+blocked; it does not deliver records across apps. Processing confirm/retry/
+cancel routes exist but currently return `410 Gone`, as described in
+[AURA Brain Processing](./AURA_BRAIN_PROCESSING.md). The endpoint stores
+analyzed segments, not a guaranteed byte-for-byte raw request. Do not
+describe complete source-data preservation or cross-app routing as
+implemented.
 
-## Preferred path: the universal Brain pipeline
+## Backend limitations to keep visible
 
-`POST /api/v1/brain/process` supersedes the per-app adapters for new
-integrations. The app submits raw content plus its own `source_app`; the Brain
-understands it, resolves the destinations from the registry, authorizes them
-against the user's connections and permissions, delivers what is allowed, and
-parks the rest for review. The app never decides where content belongs and
-never needs a new adapter for a new category.
-
-Contract, thresholds, response shape and client examples:
-`docs/AURA_BRAIN_PROCESSING.md`. The per-app adapters above remain supported
-for the already-connected clients and for app-specific pre-processing.
-
-To onboard an application to the pipeline, declare its capabilities in the
-catalog entry — `categories`, `record_types`, `routable`, `storage_adapter`,
-`ingest_scope`/`ingest_action` and `write_scope`/`write_action` — and make sure
-the default permissions grant the write scope. The user still has to connect
-the app before the Brain may deliver to it.
-
+- App-specific Android/web clients are absent from this repository; external
+  client existence is unknown.
+- Ingestion adapters normalize data and do not universally preserve the raw
+  submitted payload.
+- Notification ingestion is an event-record adapter, not reminder scheduling,
+  push delivery, read/dismiss state, or a Notification Hub backend.
+- Harness does not provide dedicated move, merge, duplicate-cleanup, or
+  reminder-scheduling operations. Duplicate detection is read-only; it does
+  not automatically delete duplicate records. Do not represent unsupported
+  operations as server-backed features. Title and metadata changes can use
+  `vault.update_record`, and copying can create a derived record only within
+  the caller's authorized namespace. AURA Core's explicit Whole-Vault Mode is
+  needed for cross-app mutations.
+- Notes, Tasks, Timeline, Workflow, Search, and Knowledge Graph catalog
+  entries do not by themselves establish complete feature APIs or products.
+- Chronos catalog/enum/collection references are AURA-side compatibility
+  markers only; the independent Chronos enterprise product and any live
+  integration are not verified.
+- Harness app scope is enforced independently of the `harness:` prefix;
+  permission checks and confirmation plans remain active.

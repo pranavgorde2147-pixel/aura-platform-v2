@@ -16,7 +16,8 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.brain_manager.db_models import BrainHealthCheck, BrainProcessingJob
+from app.brain_manager.db_models import BrainHealthCheck
+from app.brain_manager.jobs.queue import BrainJobQueue
 from app.brain_manager.lifecycle.manager import BrainRuntimeManager
 from app.brain_manager.registry.enums import BrainProvisioningStatus, BrainRuntimeStatus
 from app.brain_manager.registry.service import BrainRegistryService
@@ -129,15 +130,7 @@ class BrainHealthMonitor:
         checks["vault"] = {"record_count": record_count}
 
         # -- processing ----------------------------------------------------
-        job_rows = await session.execute(
-            select(BrainProcessingJob.status, func.count(BrainProcessingJob.id))
-            .where(
-                BrainProcessingJob.brain_id == brain.brain_id,
-                BrainProcessingJob.owner_id == brain.owner_id,
-            )
-            .group_by(BrainProcessingJob.status)
-        )
-        job_counts = {str(status): int(count) for status, count in job_rows.all()}
+        job_counts = await BrainJobQueue(session).job_counts(brain)
         checks["processing"] = {"job_counts": job_counts}
         dead = job_counts.get("dead", 0)
         if dead:

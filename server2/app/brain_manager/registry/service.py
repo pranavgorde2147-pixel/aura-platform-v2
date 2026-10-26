@@ -50,11 +50,11 @@ def memory_reference(brain_id: uuid.UUID) -> str:
 
 
 def vector_reference(brain_id: uuid.UUID) -> str:
-    return brain_relative_path(brain_id, "vector_engine")
+    return brain_relative_path(brain_id, "indexes")
 
 
 def vault_reference(brain_id: uuid.UUID) -> str:
-    return brain_relative_path(brain_id, "personal_vault")
+    return brain_relative_path(brain_id, "vault.sqlite")
 
 
 def storage_reference(brain_id: uuid.UUID, owner_id: uuid.UUID) -> str:
@@ -130,6 +130,7 @@ class BrainRegistryService:
         ai_identity_id: uuid.UUID,
         model_configuration: dict[str, Any],
         compute_allocation: dict[str, Any],
+        owner_name: str | None = None,
         manifest_version: int = 1,
     ) -> ManagedBrain:
         """Reserve (or return) the primary Brain of one owner.
@@ -176,10 +177,12 @@ class BrainRegistryService:
                 model_configuration_id=model_configuration_id(model_configuration),
                 compute_allocation=compute_allocation,
                 storage_resource_reference=storage_reference(brain_id, owner_id),
-                memory_resource_reference=memory_reference(brain_id),
+                memory_resource_reference=brain_relative_path(
+                    brain_id, "personal_memory", owner_name=owner_name
+                ),
                 vector_resource_reference=vector_reference(brain_id),
                 vault_resource_reference=vault_reference(brain_id),
-                resource_root=brain_relative_path(brain_id),
+                resource_root=brain_relative_path(brain_id, owner_name=owner_name),
                 manifest_version=manifest_version,
                 llm_runtime_status=BrainRuntimeStatus.UNREGISTERED.value,
             )

@@ -30,8 +30,14 @@ htmlcov/
 /snapshots/
 /.qdrant-initialized
 
-# Server 2 model mount (read-only host directory, never bundled)
+# Server 2 local model artifacts; only the bundled default checkpoint is tracked.
 server2/models/
+/server2/*.gguf
+!/server2/Qwen3.5-0.8B-Q4_K_M.gguf
 
 # Server 2 object-storage data (SQLite metadata + objects)
 server2/data/
+
+# Server 2 private per-Brain vaults and operator backups
+server2/brain_vaults/
+server2/brain_vault_backups/

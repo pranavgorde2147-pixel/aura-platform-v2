@@ -42,6 +42,7 @@ class Settings:
     backend: str = "local"
     data_dir: str = "./data"
     local_root: str = "./data/objects"
+    vault_backup_root: str = ""
 
     # S3 / MinIO configuration (used when backend == "s3").
     s3_endpoint_url: str = ""
@@ -70,6 +71,16 @@ class Settings:
     def resolved_local_root(self) -> Path:
         return Path(self.local_root)
 
+    @property
+    def resolved_vault_backup_root(self) -> Path:
+        server_root = Path(__file__).resolve().parents[1]
+        configured = (
+            Path(self.vault_backup_root).expanduser()
+            if self.vault_backup_root
+            else Path("brain_vault_backups")
+        )
+        return configured if configured.is_absolute() else server_root / configured
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
@@ -88,6 +99,7 @@ def get_settings() -> Settings:
         backend=os.getenv("STORAGE_BACKEND", "local").strip().lower(),
         data_dir=os.getenv("STORAGE_DATA_DIR", "./data"),
         local_root=os.getenv("STORAGE_LOCAL_ROOT", os.getenv("STORAGE_DATA_DIR", "./data") + "/objects"),
+        vault_backup_root=os.getenv("BRAIN_VAULT_BACKUP_ROOT", "").strip(),
         s3_endpoint_url=os.getenv("S3_ENDPOINT_URL", "").strip(),
         s3_bucket=os.getenv("S3_BUCKET", "aura-objects").strip(),
         s3_access_key=os.getenv("S3_ACCESS_KEY", "").strip(),

@@ -1,10 +1,4 @@
-"""llama.cpp runtime adapter: one dedicated GGUF runtime per Brain.
-
-Each Brain gets its own ``llama_cpp.Llama`` instance. The weights are the same
-read-only file (memory-mapped, so the pages are shared by the OS), but the
-*runtime* - its context, its KV cache, its sampling state and its chat
-template application - belongs to exactly one Brain.
-"""
+"""llama.cpp runtime adapter with Brain-private weights and context."""
 
 from __future__ import annotations
 
@@ -20,6 +14,7 @@ from app.brain_manager.runtime.base import (
     RuntimeHealth,
     RuntimeProvisioningError,
 )
+from app.brain_manager.runtime.artifacts import model_artifact_for_brain
 
 _THINK_PAIR = re.compile(r"<think\b[^>]*>.*?</think\s*>", re.IGNORECASE | re.DOTALL)
 _THINK_OPEN = re.compile(r"<think\b[^>]*>.*$", re.IGNORECASE | re.DOTALL)
@@ -42,7 +37,7 @@ def clean_gguf_output(text: str) -> str:
 class LlamaCppRuntime:
     """A dedicated llama.cpp runtime bound to one Brain."""
 
-    isolation = "dedicated_context"
+    isolation = "dedicated_runtime_per_brain_weights"
 
     def __init__(
         self,
@@ -195,7 +190,7 @@ class LlamaCppRuntimeAdapter:
     """Creates one dedicated llama.cpp runtime per Brain."""
 
     name = "llama_cpp"
-    isolation = "dedicated_context"
+    isolation = "dedicated_runtime_per_brain_weights"
     provider = "gguf"
 
     def __init__(self, model_path: Path, *, context_tokens: int, max_context_tokens: int) -> None:
@@ -203,13 +198,29 @@ class LlamaCppRuntimeAdapter:
         self.context_tokens = context_tokens
         self.max_context_tokens = max_context_tokens
 
-    def create(self, *, brain_id: uuid.UUID, runtime_id: str) -> BrainRuntimeHandle:
+    def create(
+        self,
+        *,
+        brain_id: uuid.UUID,
+        runtime_id: str,
+        resource_root: str | None = None,
+    ) -> BrainRuntimeHandle:
+        model_path, brain_has_private_weights = model_artifact_for_brain(
+            self.model_path,
+            brain_id=brain_id,
+            resource_root=resource_root,
+        )
         runtime = LlamaCppRuntime(
             brain_id=brain_id,
             runtime_id=runtime_id,
-            model_path=self.model_path,
+            model_path=model_path,
             context_tokens=self.context_tokens,
             max_context_tokens=self.max_context_tokens,
+        )
+        runtime.isolation = (
+            "dedicated_runtime_per_brain_weights"
+            if brain_has_private_weights
+            else "dedicated_runtime_shared_weights"
         )
         runtime.load()
         return runtime

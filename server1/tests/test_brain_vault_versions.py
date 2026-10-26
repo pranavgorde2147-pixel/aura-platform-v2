@@ -65,3 +65,66 @@ def test_list_record_versions_checks_record_namespace(
 
     assert len(calls) == expected_calls
     assert calls[0]["path"] == f"records/{record_id}"
+
+
+def test_search_can_be_limited_to_callers_own_namespace(monkeypatch):
+    user_id = uuid.uuid4()
+    brain_id = uuid.uuid4()
+    calls = []
+
+    async def require_permission(*args, **kwargs):
+        assert args[2] == "meeting"
+        assert args[3:] == ("brain", "read")
+
+    async def owned_brain(*args, **kwargs):
+        return None, SimpleNamespace(id=brain_id)
+
+    async def call_server2(requested_user_id, requested_brain_id, **kwargs):
+        assert requested_user_id == user_id
+        assert requested_brain_id == brain_id
+        calls.append(kwargs)
+        return {"results": []}
+
+    monkeypatch.setattr(vault_api, "_require_app_permission", require_permission)
+    monkeypatch.setattr(vault_api, "_owned_brain", owned_brain)
+    monkeypatch.setattr(vault_api, "_call_server2", call_server2)
+
+    async def invoke():
+        return await vault_api.search_records(
+            payload=vault_api.VaultSearchRequest(
+                source_app="meeting",
+                query="launch decisions",
+                namespace="apps/meeting",
+            ),
+            current_user=SimpleNamespace(id=user_id),
+            session=object(),
+        )
+
+    assert asyncio.run(invoke()) == {"results": []}
+    assert calls[0]["json_body"]["namespaces"] == ["apps/meeting"]
+
+
+def test_search_rejects_a_different_namespace(monkeypatch):
+    async def require_permission(*args, **kwargs):
+        return None
+
+    async def owned_brain(*args, **kwargs):
+        return None, SimpleNamespace(id=uuid.uuid4())
+
+    monkeypatch.setattr(vault_api, "_require_app_permission", require_permission)
+    monkeypatch.setattr(vault_api, "_owned_brain", owned_brain)
+
+    async def invoke():
+        return await vault_api.search_records(
+            payload=vault_api.VaultSearchRequest(
+                source_app="meeting",
+                query="launch decisions",
+                namespace="apps/health",
+            ),
+            current_user=SimpleNamespace(id=uuid.uuid4()),
+            session=object(),
+        )
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(invoke())
+    assert exc_info.value.status_code == 422

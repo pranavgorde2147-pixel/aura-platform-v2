@@ -74,21 +74,52 @@ def brain_resource_root() -> Path:
 
 
 def brain_directory_name(brain_id: uuid.UUID) -> str:
-    """Return the canonical directory name of one Brain."""
+    """Return the stable, collision-resistant directory name of one Brain."""
     return f"brain_{uuid.UUID(str(brain_id))}"
 
 
-def brain_root(brain_id: uuid.UUID, *, base: Path | None = None) -> Path:
+def named_brain_directory_name(brain_id: uuid.UUID, owner_name: str | None) -> str:
+    """Return a readable Brain directory name without using names as identity."""
+    if not owner_name:
+        return brain_directory_name(brain_id)
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", owner_name.strip()).strip("._-")[:48]
+    if not slug:
+        return brain_directory_name(brain_id)
+    return f"{slug}_{uuid.UUID(str(brain_id))}"
+
+
+def brain_root(
+    brain_id: uuid.UUID,
+    *,
+    base: Path | None = None,
+    resource_root: str | None = None,
+) -> Path:
     """Return the resource root of one Brain (created on demand by callers)."""
     root = Path(base) if base is not None else brain_resource_root()
-    return safe_join(root, brain_directory_name(brain_id))
+    relative_root = resource_root or brain_directory_name(brain_id)
+    components = relative_root.split("/")
+    if len(components) != 1:
+        raise InvalidResourcePathError("Brain resource root must be one directory")
+    directory = safe_join(root, *components)
+    if not directory.name.endswith(str(uuid.UUID(str(brain_id)))):
+        raise InvalidResourcePathError("Brain resource root does not match its Brain id")
+    return directory
 
 
-def brain_relative_path(brain_id: uuid.UUID, *parts: str) -> str:
+def brain_relative_path(
+    brain_id: uuid.UUID,
+    *parts: str,
+    owner_name: str | None = None,
+) -> str:
     """Return a Brain-relative path string used inside resource references.
 
     The result is a logical reference (``brain_<uuid>/...``), never an absolute
     filesystem path, so it can be stored in a registry row and returned by the
     admin API without leaking the server's directory layout.
     """
-    return "/".join([brain_directory_name(brain_id), *(sanitize_component(p) for p in parts)])
+    return "/".join(
+        [
+            named_brain_directory_name(brain_id, owner_name),
+            *(sanitize_component(p) for p in parts),
+        ]
+    )

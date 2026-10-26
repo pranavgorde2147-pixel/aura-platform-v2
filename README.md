@@ -37,6 +37,27 @@ bearer token; your app never talks to it directly.
 
 ---
 
+## Download the complete project and bundled model
+
+The repository includes the Qwen3.5-0.8B Q4_K_M GGUF model through Git LFS.
+Install Git LFS before cloning so the model weights are downloaded, not just
+their small pointer file:
+
+```bash
+git lfs install
+git clone https://github.com/pranavgorde2147-pixel/aura-platform-v2.git
+cd aura-platform-v2
+git lfs pull
+```
+
+The checkpoint is about 564 MiB. It is the actual Qwen3.5-0.8B-Base model
+weights, converted to Q4_K_M GGUF format. Keep it in `server2/`; the Docker
+Compose configurations mount that directory read-only at `/models`. The
+model's Apache-2.0 license is included in
+[`server2/QWEN3.5-MODEL-LICENSE.txt`](server2/QWEN3.5-MODEL-LICENSE.txt).
+
+---
+
 ## 2. Quick start (local, Docker)
 
 Docker Compose in `server1/` starts Postgres, Redis, Qdrant, Server 1 and
@@ -164,7 +185,7 @@ Authentication: send `Authorization: Bearer <access_token>` on `(auth)` routes.
 ### Personal Brain (the user-facing brain)
 | Method | Path | Body | Notes |
 |--------|------|------|-------|
-| POST | `/brain/query` | `{query, context?, use_memory=true, persist_interaction=false, memory_limit=5}` | Retrieves this user's authorized memories and app records by default, then calls Server 2; `use_memory=false` opts out |
+| POST | `/brain/query` | `{query, context?, use_memory=true, memory_limit=5}` | Stores the query before inference and the answer afterward in this user's private Server 2 vault; `use_memory=false` opts out of retrieval only |
 | POST | `/brain/ingest` | `{content, content_type?, source_app?, metadata?}` | Persists a `fact`; `source_app` requires an authorized app connection |
 | POST | `/brain/memory` | `{content, kind?, summary?, source_app?, importance?}` | 201; explicit memory |
 | GET | `/brain/memory?limit&offset` | – | list memories |
@@ -205,8 +226,12 @@ Supported ingestion slugs: `brain` (AURA Chat), `study`, `diary`, `meeting`,
 external provider used), `server2_error` (both failed).
 
 Memories are labelled **`fact`** (user/app supplied) vs **`interpretation`**
-(AI-generated) vs `event`. Nothing is persisted unless you opt in
-(`persist_interaction=true` or `POST /brain/memory`).
+(AI-generated) vs `event`. Brain query attempts and successful answers are
+stored in the owner's private vault automatically, including requests from
+older clients that send `persist_interaction:false`. If inference is unavailable,
+the submitted query remains stored with a pending interaction status for retry.
+`use_memory=false` disables retrieval for that request; it does not disable
+query persistence.
 
 ### Files (Server 1 → Server 2 storage API proxy)
 | Method | Path | Body | Notes |
@@ -455,16 +480,16 @@ Docker-internal URLs are `AI_SERVER_URL=http://aura-server2:8001` and
 `STORAGE_SERVER_URL=http://aura-server2:8001`.
 
 ### B. Render (managed PaaS)
-`render.yaml` defines two services: `aura-server1a-core` and `aura-server2`.
-Create managed datastores and paste their URLs as dashboard secrets:
+`render.yaml` defines only the existing `aura-server1a-core` service. Server 2
+stays on the laptop behind the Cloudflare Tunnel; do not deploy it from this
+Blueprint. Configure the Server 1 environment and Cloudflare Access values as
+described in [AURA Render setup](docs/AURA_RENDER_SETUP.md). Keep the managed
+datastores and URLs as dashboard secrets:
 - Postgres → **Neon** (`POSTGRES_URL`)
 - Redis → **Upstash** (`REDIS_URL`)
 - Qdrant → **Qdrant Cloud** (`QDRANT_URL`)
 
-Server 1's deploy command runs `alembic upgrade head` automatically. Server 2
-runs in external-provider mode (`AURA_SKIP_MODEL_LOAD=1`, Groq) with a Render
-disk at `/var/data` for object storage. If you prefer not to use a disk, set
-`STORAGE_BACKEND=s3` and the `S3_*` variables to use Cloudflare R2.
+Server 1's deploy command runs `alembic upgrade head` automatically.
 
 ### C. Server 2 on a laptop GPU + cloud Server 1
 ```bash
@@ -560,7 +585,7 @@ present.
 | `/ready` → 503 | Postgres/Redis/Qdrant unreachable; check `services` in `/health` |
 | `brain/query` → `source: server2_error` | Server 2 down or token mismatch; enable `AI_FALLBACK_ENABLED` |
 | Server 2 → 401 | `INTERNAL_API_TOKEN` differs between Server 1 and 2 |
-| Storage → 401/503 | `STORAGE_API_TOKEN` mismatch; 503 means Server 2 storage has no token set |
+| Storage → 401/503 | `STORAGE_API_TOKEN` mismatch; Server 2 falls back to `INTERNAL_API_TOKEN` when unset, and returns 503 only if both are unset |
 | `brain/query` → 400 | `AI_SERVER_MODEL` ≠ Server 2's model id |
 | File upload → 413 | Exceeds `MAX_UPLOAD_SIZE_BYTES` |
 | File upload → 415 | Content type not in `ALLOWED_CONTENT_TYPES` (Server 2 storage) |

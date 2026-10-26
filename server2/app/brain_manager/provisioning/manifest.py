@@ -10,7 +10,7 @@ Two rules are enforced mechanically:
 * **No secrets.** A manifest never contains a credential, a token, an API key
   or a connection string. :func:`assert_no_secrets` fails closed.
 * **No absolute server paths.** Resource references are logical
-  (``brain_<uuid>/personal_vault``), not filesystem paths.
+  (``<owner>_<uuid>/personal_vault``), not filesystem paths.
 """
 
 from __future__ import annotations
@@ -102,6 +102,7 @@ def build_manifest(
     brain_id: str,
     owner_user_id: str,
     ai_identity_id: str,
+    owner_name: str | None = None,
     provisioning_status: str,
     llm_runtime_id: str | None,
     llm_runtime_status: str,
@@ -132,6 +133,8 @@ def build_manifest(
         "connected_app_count": connected_app_count,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
+    if owner_name is not None:
+        manifest["owner_name"] = owner_name
     if extra:
         manifest.update(extra)
     assert_no_secrets(manifest)

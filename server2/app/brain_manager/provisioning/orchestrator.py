@@ -29,22 +29,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.brain_manager.db_models import BrainManifestRecord
 from app.brain_manager.lifecycle.manager import BrainRuntimeManager
+from app.brain_manager.runtime.base import RuntimeProvisioningError
+from app.brain_manager.runtime.artifacts import provision_private_model_artifact
 from app.brain_manager.provisioning.manifest import (
     MANIFEST_VERSION,
     build_manifest,
     serialize_manifest,
 )
+from app.brain_manager.config import get_brain_manager_config
 from app.brain_manager.registry.enums import BrainProvisioningStatus, BrainRuntimeStatus
 from app.brain_manager.registry.persistence import get_or_create
 from app.brain_manager.registry.service import (
     BrainRegistryService,
-    memory_reference,
     storage_reference,
-    vector_reference,
-    vault_reference,
 )
 from app.brain_manager.resource_manager.paths import brain_root
+from app.brain_manager.runtime.factory import resolve_model_path
 from app.brain_manager.vault.service import BrainVaultService
+from app.brain_manager.vault.storage import get_brain_vault_storage
 from app.storage_db import ManagedBrain
 
 logger = logging.getLogger(__name__)
@@ -91,6 +93,7 @@ class BrainProvisioningOrchestrator:
         brain_id: uuid.UUID,
         owner_id: uuid.UUID,
         ai_identity_id: uuid.UUID,
+        owner_name: str | None = None,
         model_configuration: dict[str, Any],
         compute_allocation: dict[str, Any] | None = None,
         manifest_version: int = MANIFEST_VERSION,
@@ -109,26 +112,69 @@ class BrainProvisioningOrchestrator:
             ai_identity_id=ai_identity_id,
             model_configuration=model_configuration,
             compute_allocation=allocation,
+            owner_name=owner_name,
             manifest_version=manifest_version,
         )
         steps.append("registry_reserved")
 
-        # -- 2. resource manifest ----------------------------------------
-        manifest = await self._write_manifest(session, brain, model_configuration, allocation)
+        # Initialize the private data tree before expensive model provisioning.
+        brain_directory = brain_root(
+            brain.brain_id, resource_root=brain.resource_root
+        )
+        brain_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        (brain_directory / "personal_llm").mkdir(mode=0o700, exist_ok=True)
+        vault = BrainVaultService(session)
+        await vault.ensure_initialized(brain)
+        steps.extend(["personal_vault_initialized", "brain_resource_directories_initialized"])
+
+        if get_brain_manager_config().runtime_mode == "dedicated":
+            try:
+                await provision_private_model_artifact(
+                    resolve_model_path(get_brain_manager_config()),
+                    brain_id=brain.brain_id,
+                    resource_root=brain.resource_root,
+                )
+                steps.append("private_model_weights_provisioned")
+            except RuntimeProvisioningError as exc:
+                await BrainRegistryService.set_runtime_state(
+                    session,
+                    brain,
+                    llm_runtime_status=BrainRuntimeStatus.FAILED,
+                    error=exc.code,
+                )
+                await BrainRegistryService.set_provisioning_state(
+                    session,
+                    brain,
+                    provisioning_status=BrainProvisioningStatus.FAILED,
+                    error=exc.code,
+                )
+                manifest = await self._refresh_manifest(
+                    session, brain, owner_name=owner_name
+                )
+                return ProvisioningOutcome(
+                    brain_id=brain.brain_id,
+                    owner_user_id=brain.owner_id,
+                    ai_identity_id=brain.ai_identity_id,
+                    provisioning_status=BrainProvisioningStatus.FAILED,
+                    llm_runtime_id=brain.llm_runtime_id,
+                    llm_runtime_status=BrainRuntimeStatus.FAILED,
+                    runtime_isolation=brain.runtime_isolation,
+                    model_configuration_id=brain.model_configuration_id,
+                    manifest=manifest,
+                    error_code=exc.code,
+                    created=created,
+                    steps=steps,
+                )
+
+        # Publish the manifest only after the initial private resources exist.
+        manifest = await self._write_manifest(
+            session, brain, model_configuration, allocation, owner_name=owner_name
+        )
         steps.append("manifest_written")
 
         # -- 3/4. compute capacity and the dedicated runtime --------------
         runtime_result = await self.runtime_manager.provision_runtime(session, brain)
         steps.append(f"runtime:{runtime_result.status.value}")
-
-        # -- 5. memory and vector resources -------------------------------
-        vault = BrainVaultService(session)
-        await vault.ensure_initialized(brain)
-        steps.append("vector_space_initialized")
-
-        # -- 6. personal vault --------------------------------------------
-        await vault.ensure_initialized(brain)
-        steps.append("vault_initialized")
 
         # -- 7. processing and app-connection configuration ---------------
         # The job queue starts empty and the app-connection snapshot starts
@@ -145,7 +191,11 @@ class BrainProvisioningOrchestrator:
             BrainRuntimeStatus.READY_SIMULATED,
             BrainRuntimeStatus.READY_EXTERNAL,
         }
-        if runtime_ready:
+        runtime_deferred = runtime_result.status in {
+            BrainRuntimeStatus.WAITING_FOR_RESOURCES,
+            BrainRuntimeStatus.RESOURCE_LIMITED,
+        }
+        if runtime_ready or runtime_deferred:
             await BrainRegistryService.set_provisioning_state(
                 session,
                 brain,
@@ -162,7 +212,7 @@ class BrainProvisioningOrchestrator:
             )
             status = BrainProvisioningStatus.FAILED
 
-        manifest = await self._refresh_manifest(session, brain)
+        manifest = await self._refresh_manifest(session, brain, owner_name=owner_name)
         return ProvisioningOutcome(
             brain_id=brain.brain_id,
             owner_user_id=brain.owner_id,
@@ -185,12 +235,19 @@ class BrainProvisioningOrchestrator:
         brain: ManagedBrain,
         model_configuration: dict[str, Any],
         compute_allocation: dict[str, Any],
+        *,
+        owner_name: str | None,
     ) -> dict[str, Any]:
         """Build the manifest and store it (database + Brain directory)."""
+        record = await self._manifest_record(session, brain)
+        persisted_owner_name = owner_name
+        if persisted_owner_name is None:
+            persisted_owner_name = record.manifest.get("owner_name")
         manifest = build_manifest(
             brain_id=str(brain.brain_id),
             owner_user_id=str(brain.owner_id),
             ai_identity_id=str(brain.ai_identity_id),
+            owner_name=persisted_owner_name,
             provisioning_status=brain.provisioning_status,
             llm_runtime_id=brain.llm_runtime_id,
             llm_runtime_status=brain.llm_runtime_status,
@@ -198,27 +255,35 @@ class BrainProvisioningOrchestrator:
             model_configuration_id=brain.model_configuration_id,
             compute_allocation=compute_allocation,
             resource_references={
-                "identity": f"brain_{brain.brain_id}/identity",
-                "personal_llm": f"brain_{brain.brain_id}/personal_llm",
-                "memory": memory_reference(brain.brain_id),
-                "vector": vector_reference(brain.brain_id),
-                "vault": vault_reference(brain.brain_id),
+                "root": brain.resource_root,
+                "personal_llm": f"{brain.resource_root}/personal_llm",
+                "model_weights": self._model_weights_reference(brain),
+                "memory": f"{brain.resource_root}/memory_vault",
+                "vector": f"{brain.resource_root}/indexes",
+                "vault": f"{brain.resource_root}/memory_vault/vault.sqlite",
+                "objects": f"{brain.resource_root}/objects",
                 "storage": storage_reference(brain.brain_id, brain.owner_id),
-                "compute": f"brain_{brain.brain_id}/brain_compute",
-                "processing": f"brain_{brain.brain_id}/brain_processing",
-                "connected_apps": f"brain_{brain.brain_id}/connected_apps",
             },
             connected_app_count=brain.connected_app_count,
         )
 
-        record = await self._manifest_record(session, brain)
         record.manifest = manifest
         record.manifest_version = MANIFEST_VERSION
         await session.commit()
 
         try:
-            directory = brain_root(brain.brain_id)
-            directory.mkdir(parents=True, exist_ok=True)
+            directory = brain_root(
+                brain.brain_id, resource_root=brain.resource_root
+            )
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            (directory / "personal_llm").mkdir(mode=0o700, exist_ok=True)
+            (directory / "personal_llm" / "model_weights").mkdir(
+                mode=0o700, exist_ok=True
+            )
+            storage = get_brain_vault_storage()
+            storage.memory_vault_directory(brain)
+            storage.object_directory(brain)
+            storage.index_directory(brain)
             (directory / "brain_manifest.json").write_text(
                 serialize_manifest(manifest), encoding="utf-8"
             )
@@ -232,12 +297,39 @@ class BrainProvisioningOrchestrator:
             )
         return manifest
 
+    @staticmethod
+    def _model_weights_reference(brain: ManagedBrain) -> str:
+        """Describe an existing private model copy, otherwise the configured artifact."""
+        model_path = resolve_model_path(get_brain_manager_config())
+        weights_root = brain_root(
+            brain.brain_id, resource_root=brain.resource_root
+        ) / "personal_llm" / "model_weights"
+        private_model = weights_root if model_path.is_dir() else weights_root / model_path.name
+        private_model_exists = (
+            (private_model / "config.json").is_file()
+            if model_path.is_dir()
+            else private_model.is_file()
+        )
+        if not private_model_exists:
+            return "shared_model_artifact"
+        suffix = private_model.name if private_model.is_file() else ""
+        relative = f"{brain.resource_root}/personal_llm/model_weights"
+        return f"{relative}/{suffix}" if suffix else relative
+
     async def _refresh_manifest(
-        self, session: AsyncSession, brain: ManagedBrain
+        self,
+        session: AsyncSession,
+        brain: ManagedBrain,
+        *,
+        owner_name: str | None,
     ) -> dict[str, Any]:
         """Rebuild the manifest so it reflects the final state."""
         return await self._write_manifest(
-            session, brain, brain.model_configuration or {}, brain.compute_allocation or {}
+            session,
+            brain,
+            brain.model_configuration or {},
+            brain.compute_allocation or {},
+            owner_name=owner_name,
         )
 
     async def _manifest_record(

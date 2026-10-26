@@ -16,13 +16,17 @@ The object-storage engine runs inside Server 2, and Server 1 points
 
 | Option | Server 1 | Server 2 |
 |--------|----------|----------|
-| A. All-cloud free | Render | Render + Groq (no GPU) + Render disk or R2 |
-| B. Hybrid (GPU laptop) | Render/VM | Friend's RTX laptop (GGUF) + tunnel |
+| A. Hybrid (GPU laptop; current target) | Render | User's laptop (GGUF) + Cloudflare Tunnel |
+| B. All-cloud alternative | Render | Render + external provider (no local model) + disk or R2 |
 | C. Single VM | same VM via Docker | same VM via Docker |
+
+For the current Render + laptop setup, follow
+[AURA Render setup](docs/AURA_RENDER_SETUP.md). The root `render.yaml` defines
+Server 1 only; Server 2 is not a Render Blueprint service.
 
 ---
 
-## Option B - Server 2 on a friend's GPU laptop
+## Option A - Server 2 on the laptop behind Cloudflare Tunnel
 
 ### 1. Run the model on the GPU
 
@@ -165,7 +169,7 @@ are stripped before sending.
 
 ---
 
-## Option A/C - cloud deployment
+## Option B - optional all-cloud deployment
 
 `render.yaml` at the repo root defines both Render services
 (`aura-server1a-core`, `aura-server2`). Create the datastores first, then paste

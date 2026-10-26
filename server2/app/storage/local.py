@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 from pathlib import Path
 from typing import BinaryIO, Iterator
 
@@ -70,11 +69,12 @@ class LocalObjectStore:
             path.unlink()
         parent = path.parent
         root = self.root.resolve()
-        if parent != root:
+        while parent != root and root in parent.parents:
             try:
-                shutil.rmtree(parent)
+                parent.rmdir()
             except OSError:
-                pass
+                break
+            parent = parent.parent
 
     def exists(self, key: str) -> bool:
         try:

@@ -37,6 +37,7 @@ class BrainProvisionRequest(BaseModel):
     brain_id: uuid.UUID
     owner_id: uuid.UUID
     ai_identity_id: uuid.UUID
+    owner_name: str | None = Field(default=None, max_length=255)
     model_id: str = Field(min_length=1, max_length=128)
     resource_manifest_version: int = Field(default=1, ge=1)
     max_concurrent_requests: int = Field(default=1, ge=1, le=8)
@@ -48,6 +49,7 @@ class BrainRegistryResponse(BaseModel):
     ai_identity_id: uuid.UUID
     provisioning_status: str
     inference_runtime_status: str
+    resource_manifest_version: int = 1
     model_configuration: dict
     compute_allocation: dict
     storage_resource_reference: str
@@ -74,6 +76,7 @@ def _response(brain: ManagedBrain) -> BrainRegistryResponse:
         ai_identity_id=brain.ai_identity_id,
         provisioning_status=brain.provisioning_status,
         inference_runtime_status=brain.llm_runtime_status,
+        resource_manifest_version=brain.resource_manifest_version,
         model_configuration=brain.model_configuration,
         compute_allocation=brain.compute_allocation,
         storage_resource_reference=brain.storage_resource_reference,
@@ -132,6 +135,7 @@ async def provision_brain(
             brain_id=payload.brain_id,
             owner_id=payload.owner_id,
             ai_identity_id=payload.ai_identity_id,
+            owner_name=payload.owner_name,
             model_configuration=model_configuration,
             compute_allocation=compute_allocation,
             manifest_version=payload.resource_manifest_version,

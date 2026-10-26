@@ -97,7 +97,7 @@ services:
       MODEL_NAME: ${MODEL_NAME:-Qwen3.5-0.8B}
       MODEL_PATH: ${MODEL_PATH:-/models/Qwen3.5-0.8B-Q4_K_M.gguf}
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-}
-      AURA_SKIP_MODEL_LOAD: ${AURA_SKIP_MODEL_LOAD:-1}
+      AURA_SKIP_MODEL_LOAD: ${AURA_SKIP_MODEL_LOAD:-0}
       EXTERNAL_AI_URL: ${EXTERNAL_AI_URL:-}
       EXTERNAL_AI_KEY: ${EXTERNAL_AI_KEY:-}
       EXTERNAL_MODEL: ${EXTERNAL_MODEL:-}
@@ -108,7 +108,7 @@ services:
       STORAGE_DATABASE_URL: ${STORAGE_DATABASE_URL:-sqlite+aiosqlite:////var/data/storage.db}
       STORAGE_API_TOKEN: ${STORAGE_API_TOKEN:-${INTERNAL_API_TOKEN:-}}
     volumes:
-      - ${MODEL_HOST_PATH:-./models}:/models:ro
+      - ${MODEL_HOST_PATH:-../server2}:/models:ro
       - storage_data:/var/data
     networks:
       - aura-network

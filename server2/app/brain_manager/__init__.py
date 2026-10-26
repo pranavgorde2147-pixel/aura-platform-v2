@@ -11,11 +11,11 @@ This package owns everything that makes a Brain a *separate* Brain:
 
 The logical resource layout maps onto the following packages::
 
-    brain_manager/registry              -> registered_brains/brain_<uuid>/identity
-    brain_manager/runtime               -> registered_brains/brain_<uuid>/personal_llm/inference_runtime
-    brain_manager/provisioning/manifest -> registered_brains/brain_<uuid>/brain_manifest.json
-    brain_manager/jobs                  -> registered_brains/brain_<uuid>/brain_compute/job_queue
-    brain_manager/vault                 -> registered_brains/brain_<uuid>/personal_vault
+    brain_manager/registry              -> registered_brains/<owner>_<uuid>/identity
+    brain_manager/runtime               -> registered_brains/<owner>_<uuid>/personal_llm/inference_runtime
+    brain_manager/provisioning/manifest -> registered_brains/<owner>_<uuid>/brain_manifest.json
+    brain_manager/jobs                  -> registered_brains/<owner>_<uuid>/brain_compute/job_queue
+    brain_manager/vault                 -> registered_brains/<owner>_<uuid>/personal_vault
 """
 
 from __future__ import annotations
